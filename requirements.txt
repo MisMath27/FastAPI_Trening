@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+environs
+dataclasses
+python-dotenv
