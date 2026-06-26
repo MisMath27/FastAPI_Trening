@@ -310,7 +310,7 @@ class SessionManager:
         return f"{user_id}.{timestamp}.{signature}"
 
 
-SECRET_KEY = config.secret_key
+SECRET_KEY = config.secret_key or "your-secret-key-here-change-in-production"
 session_manager = SessionManager(SECRET_KEY)
 
 class LoginData(BaseModel):
@@ -409,6 +409,226 @@ async def get_profile(response: Response, request: Request, session_token: Optio
 async def logout(response: Response):
     response.delete_cookie("session_token")
     return{"message": "Logout successful"}
+
+
+
+class CommonHeaders(BaseModel):
+    user_agent: str = Field(..., alias='User-Agent', description='User-Agent user headers')
+    accept_language: str = Field(..., alias='Accept-Language', description='Accept-Language user geaders')
+
+    class Config:
+        populate_by_name = True
+        allow_population_by_field_name = True
+
+    @validator('accept_language')
+    def validate_accept_language(cls, v: str) -> str:
+        if not v or len(v.strip()) < 2:
+            raise ValueError("Invalid Accept-Language format: empty or too short")
+
+        parts = v.split(',')
+
+        for part in parts:
+            part = part.strip()
+            if not part:
+                raise ValueError("Invalid Accept-Language format: empty part")
+            if ';' in part:
+                lang_part, quality_part = part.split(';', 1)
+                lang_part = lang_part.strip()
+                quality_part = quality_part.strip()
+
+                if not quality_part.startswith('q='):
+                    raise ValueError("Invalid Accept-Language format: invalid quality parameter format")
+
+                try:
+                    q_value = float(quality_part[2:])
+                    if not (0 <= q_value <= 1):
+                        raise ValueError("Invalid Accept-Language format: quality value must be between 0 and 1")
+                except ValueError:
+                    raise ValueError("Invalid Accept-Language format: invalid quality value")
+
+            else:
+                lang_part = part.strip()
+
+            if not lang_part:
+                raise ValueError("Invalid Accept-Language format: empty language tag")
+
+            if not re.match(r'^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$', lang_part):
+                raise ValueError(f'Invalid Accept-Language format: invalid language tag "{lang_part}"')
+
+        return v
+
+
+async def get_common_headers(
+    user_agent: str = Header(..., alias="User-Agent"),
+    accept_language: str = Header(..., alias="Accept-Language")
+) -> CommonHeaders:
+    """
+    Извлекает заголовки из запроса и возвращает модель CommonHeaders
+    """
+    return CommonHeaders(
+        user_agent=user_agent,
+        accept_language=accept_language
+    )
+
+
+@app.get('/headers')
+async def get_headers_common(headers: CommonHeaders = Depends(get_common_headers)):
+    return headers.model_dump(by_alias=True)
+
+
+@app.get('/info')
+async def get_info(response: Response = None, headers: CommonHeaders = Depends(get_common_headers)):
+    server_time = datetime.now().isoformat()
+
+    if response:
+        response.headers["X-Server-Time"] = server_time
+
+    return {
+        "message": "Добро пожаловать! Ваши заголовки успешно обработаны.",
+        "headers": headers.dict(by_alias=True),
+        "server_time": server_time
+    }
+
+
+@app.get('/headers_2')
+async def det_headers(request: Request,
+                      user_agent: Optional[str] = Header(None, alias="User-Agent"),
+                      accept_language: Optional[str] = Header(None, alias='Accept-Language')):
+
+    if user_agent is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required haider: User-Agent"
+
+        )
+
+    if accept_language is None:
+        raise HTTPException(
+            status_code=400,
+            detail='Missing required haider: Accept-Language'
+        )
+
+    return {
+        "User-Agent": user_agent,
+        "Accept-Language": accept_language
+    }
+
+
+MINIMUM_APP_VERSION = '0.0.2'
+
+
+def compare_versions(current: str, minimum: str) -> bool:
+    """
+    Сравнивает версии.
+    Возвращает True, если current >= minimum
+    """
+    try:
+        return version.parse(current) >= version.parse(minimum)
+    except Exception:
+        return False
+
+
+class CommonHeaders_2(BaseModel):
+    user_agent: str = Field(
+        ...,
+        alias='User-Agent',
+        description='User-Agent header'
+    )
+    accept_language: str = Field(
+        ...,
+        alias='Accept-Language',
+        description='Accept-Language header'
+    )
+    x_current_version: str = Field(
+        ...,
+        alias='X-Current-Version',
+        description='Current app version (format: X.Y.Z)'
+    )
+
+    class Config:
+        populate_by_name = True
+        allow_population_by_field_name = True
+
+    @validator('accept_language')
+    def validate_accept_language(cls, v: str) -> str:
+        if not v or len(v.strip()) < 2:
+            raise ValueError("Invalid Accept-Language format: empty or too short")
+
+        parts = v.split(',')
+
+        for part in parts:
+            part = part.strip()
+            if not part:
+                raise ValueError("Invalid Accept-Language format: empty part")
+            if ';' in part:
+                lang_part, quality_part = part.split(';', 1)
+                lang_part = lang_part.strip()
+                quality_part = quality_part.strip()
+
+                if not quality_part.startswith('q='):
+                    raise ValueError("Invalid Accept-Language format: invalid quality parameter format")
+
+                try:
+                    q_value = float(quality_part[2:])
+                    if not (0 <= q_value <= 1):
+                        raise ValueError("Invalid Accept-Language format: quality value must be between 0 and 1")
+                except ValueError:
+                    raise ValueError("Invalid Accept-Language format: invalid quality value")
+            else:
+                lang_part = part.strip()
+
+            if not lang_part:
+                raise ValueError("Invalid Accept-Language format: empty language tag")
+
+            if not re.match(r'^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$', lang_part):
+                raise ValueError(f'Invalid Accept-Language format: invalid language tag "{lang_part}"')
+
+        return v
+
+    @validator('x_current_version')
+    def validate_version(cls, v: str) -> str:
+        if not re.match(r'^\d+\.\d+\.\d+$', v):
+            raise ValueError(f'Invalid version format: "{v}". Expected format: X.Y.Z (e.g., 1.2.3)')
+
+        if not compare_versions(v, MINIMUM_APP_VERSION):
+            raise ValueError(
+                f'Требуется обновить приложение. '
+                f'Ваша версия: {v}, минимальная: {MINIMUM_APP_VERSION}'
+            )
+
+        return v
+
+
+async def get_common_headers_2(
+    user_agent: str = Header(..., alias="User-Agent"),
+    accept_language: str = Header(..., alias="Accept-Language"),
+    x_current_version: str = Header(..., alias="X-Current-Version")
+) -> CommonHeaders_2:
+    return CommonHeaders_2(
+        user_agent=user_agent,
+        accept_language=accept_language,
+        x_current_version=x_current_version
+    )
+
+
+@app.get('/headers_3')
+async def get_headers_common(headers: CommonHeaders_2 = Depends(get_common_headers_2)):
+    return headers.dict(by_alias=True)
+
+
+@app.get('/info')
+async def get_info(
+    response: Response,
+    headers: CommonHeaders_2 = Depends(get_common_headers_2)
+):
+    server_time = datetime.now().isoformat()
+    response.headers["X-Server-Time"] = server_time
+
+    return {
+        "message": "Добро пожаловать! Ваши заголовки успешно обработаны.",
+        "headers": headers.dict(by_alias=True),
+        "server_time": server_time
+    }
 
 
 
