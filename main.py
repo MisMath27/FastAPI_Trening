@@ -42,17 +42,17 @@ def read_root():
 
 
 
-class User(BaseModel):
-    name: str
-    age: int
+# class User(BaseModel):
+#     name: str
+#     age: int
 
-class UserResponse(BaseModel):
-    message: str
-    user: User
-
-@app.post("/users/", response_model=UserResponse)
-async def create_user(user: User):
-    return {"message": f"Пользователь {user.name} создан!", "user": user}
+# class UserResponse(BaseModel):
+#     message: str
+#     user: User
+#
+# @app.post("/users/", response_model=UserResponse)
+# async def create_user(user: User):
+#     return {"message": f"Пользователь {user.name} создан!", "user": user}
 
 
 class Event(BaseModel):
@@ -87,7 +87,6 @@ async def create_file(file: Annotated[bytes, File()]):
     return {"file_size": len(file)}
 
 
-# другой пример обновления роута из main.py
 @app.post("/uploadfile/")
 async def create_upload_file(file: UploadFile):
     with open(file.filename, "wb") as f:
@@ -107,7 +106,6 @@ def hello(name: str):
     return {"message": f"Привет, {name}!"}
 
 
-# ИСПРАВЛЕНО: create_feedback вместо cleate_feedback
 @app.post('/feedback')
 async def create_feedback(feedback: Feedback, is_premium: bool = Query(False)):
     response_message = f'Спасибо, {feedback.name}! Ваш отзыв сохранён.'
@@ -631,7 +629,125 @@ async def get_info(
     }
 
 
+security = HTTPBasic()
 
+class User(BaseModel):
+    username: str
+    password: str
+
+USER_DATA = [
+    User(**{"username": "user1", "password": "pass1"}),
+    User(**{"username": "user2", "password": "pass2"})
+
+]
+
+
+@app.get('/login_2')
+async def login(credentials: HTTPBasicCredentials = Depends(security)):
+    user_found = False
+    for user in USER_DATA:
+        if user.username == credentials.username and user.password == credentials.password:
+            user_found = True
+            break
+
+    if not user_found:
+        headers = {'WWW-Authenticate': "Basic"}
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Incorrect date of username',
+            headers=headers
+        )
+
+    return {"message": "You got my secret, welcome"}
+
+
+
+class AuthUserBase(BaseModel):
+    username: str
+
+
+class AuthUserRegister(AuthUserBase):
+    password: str
+
+
+class AuthUserInDB(AuthUserBase):
+    hashed_password: str
+
+
+def hash_password(password: str) -> str:
+    password_bytes = password[:72].encode('utf-8')
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password_bytes, salt).decode('utf-8')
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    password_bytes = password[:72].encode('utf-8')
+    hashed_bytes = hashed.encode('utf-8')
+    return bcrypt.checkpw(password_bytes, hashed_bytes)
+
+
+
+fake_users_db: dict[str, AuthUserInDB] = {}
+
+
+def auth_user(credentials: HTTPBasicCredentials = Depends(security)) -> AuthUserInDB:
+    username = credentials.username
+    user = fake_users_db.get(username)
+
+    if user is None:
+
+        fake_password = credentials.password[:72]
+        fake_hashed = hash_password("fake")
+        verify_password(fake_password, fake_hashed)
+
+        headers = {'WWW-Authenticate': "Basic"}
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Incorrect username or password',
+            headers=headers
+        )
+
+
+    if not verify_password(credentials.password, user.hashed_password):
+        headers = {'WWW-Authenticate': "Basic"}
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Incorrect username or password',
+            headers=headers
+        )
+
+
+    if not secrets.compare_digest(username, user.username):
+        headers = {"WWW-Authenticate": "Basic"}
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Incorrect username or password',
+            headers=headers
+        )
+
+    return user
+
+
+
+@app.post("/register")
+async def register(user: AuthUserRegister):
+    if user.username in fake_users_db:
+        raise HTTPException(status_code=400, detail="Username already registered")
+
+    hashed_password = hash_password(user.password)
+
+    fake_users_db[user.username] = AuthUserInDB(
+        username=user.username,
+        hashed_password=hashed_password
+    )
+
+    return {"message": f"User {user.username} registered successfully"}
+
+
+
+@app.get("/login")
+async def login(user: AuthUserInDB = Depends(auth_user)):
+    return {"message": f"Welcome, {user.username}!"}
 
 
 

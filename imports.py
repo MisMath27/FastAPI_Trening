@@ -17,3 +17,7 @@ import time
 from packaging import version
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from passlib.context import CryptContext
+import secrets
+import bcrypt
