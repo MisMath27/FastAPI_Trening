@@ -1,7 +1,19 @@
 from imports import *
 from security import *
-from db import get_user, USERS_DATA, authenticate_user
+from db import *
 from models import *
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from models import TokenResponse, RefreshRequest
+from security import (
+    create_access_token,
+    create_refresh_token,
+    get_current_user,
+    verify_refresh_token,
+    verify_password,
+    hash_password
+)
 
 
 config = load_config()
@@ -20,20 +32,23 @@ if MODE == 'PROD':
         title="API (PROD)"
     )
     logger.info("Application started in PROD mode - documentation disabled")
-
 else:
     app = FastAPI(
         docs_url=None,
-        redoc_url = None,
-        openapi_url = None,
+        redoc_url=None,
+        openapi_url=None,
         title="API (DEV)"
     )
     logger.info("Application started in DEV mode - documentation will be protected")
 
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
 def authenticate_docs(credentials: HTTPBasicCredentials = Depends(HTTPBasic())):
     if MODE != "DEV":
         raise HTTPException(status_code=404, detail='Not Found')
-
     correct_username = secrets.compare_digest(
         credentials.username,
         settings.DOCS_USER or 'admin'
@@ -42,7 +57,6 @@ def authenticate_docs(credentials: HTTPBasicCredentials = Depends(HTTPBasic())):
         credentials.password,
         settings.DOCS_PASSWORD or 'secret'
     )
-
     if not (correct_username and correct_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -51,9 +65,11 @@ def authenticate_docs(credentials: HTTPBasicCredentials = Depends(HTTPBasic())):
         )
     return credentials
 
+
 if MODE == "DEV":
     from fastapi.openapi.docs import get_swagger_ui_html
     from fastapi.openapi.utils import get_openapi
+
 
     @app.get('/docs', include_in_schema=False)
     async def custom_swagger_ui_html(auth: HTTPBasicCredentials = Depends(authenticate_docs)):
@@ -64,16 +80,15 @@ if MODE == "DEV":
             swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
         )
 
+
     @app.get('/openapi.json', include_in_schema=False)
     async def custom_openapi_json(
             auth: HTTPBasicCredentials = Depends(authenticate_docs)
     ):
         return app.openapi()
 
+
     logger.info("Docs available at /docs with basic auth")
-
-
-
 
 
 class Contact(BaseModel):
@@ -96,9 +111,7 @@ class Feedback(BaseModel):
     @validator('message')
     def validate_message(cls, message):
         forbidden = ["редиска", "бяка", "козявка"]
-        # ИСПРАВЛЕНО: правильный паттерн с закрывающей скобкой
         pattern = r'\b(' + '|'.join(forbidden) + r')\b'
-        # ИСПРАВЛЕНО: re.search вместо re.rearch
         if re.search(pattern, message, re.IGNORECASE):
             raise ValueError("Сообщение содержит запрещенные слова")
         return message
@@ -108,20 +121,6 @@ class Feedback(BaseModel):
 def read_root():
     logger.info("Корневой маршрут вызван")
     return {"message": "Здарова, заебал!"}
-
-
-
-# class User(BaseModel):
-#     name: str
-#     age: int
-
-# class UserResponse(BaseModel):
-#     message: str
-#     user: User
-#
-# @app.post("/users/", response_model=UserResponse)
-# async def create_user(user: User):
-#     return {"message": f"Пользователь {user.name} создан!", "user": user}
 
 
 class Event(BaseModel):
@@ -142,13 +141,11 @@ def read_custom_message():
 
 @app.get("/config")
 def get_config():
-    """Маршрут для проверки конфигурации"""
     return {
         "secret_key": config.secret_key,
         "database_url": config.db.database_url,
         "debug": config.debug,
     }
-
 
 
 @app.post("/files/")
@@ -159,7 +156,7 @@ async def create_file(file: Annotated[bytes, File()]):
 @app.post("/uploadfile/")
 async def create_upload_file(file: UploadFile):
     with open(file.filename, "wb") as f:
-        while chunk := await file.read(1024):  # Читаем по 1 КБ
+        while chunk := await file.read(1024):
             f.write(chunk)
     return {"filename": file.filename}
 
@@ -178,17 +175,15 @@ def hello(name: str):
 @app.post('/feedback')
 async def create_feedback(feedback: Feedback, is_premium: bool = Query(False)):
     response_message = f'Спасибо, {feedback.name}! Ваш отзыв сохранён.'
-
     if is_premium:
         response_message += " Ваш отзыв будет рассмотрен в приоритетном порядке."
-
     return {'message': response_message}
 
 
 @app.get("/items/")
 async def read_item(
-    skip: int = Query(0, alias="start", ge=0),
-    limit: int = Query(10, le=100)
+        skip: int = Query(0, alias="start", ge=0),
+        limit: int = Query(10, le=100)
 ):
     return {"skip": skip, "limit": limit}
 
@@ -203,6 +198,7 @@ class UserCreate(BaseModel):
 @app.post("/create_user/")
 async def create_item(create_user: UserCreate):
     return create_user
+
 
 sample_products = [
     {"product_id": 123, "name": "Smartphone", "category": "Electronics", "price": 599.99},
@@ -229,89 +225,20 @@ async def search_products(
 ):
     res = []
     keyword = keyword.lower()
-
     for product in sample_products:
         if keyword not in product['name'].lower():
             continue
-
         if category and product['category'].lower() != category.lower():
             continue
-
         res.append(product)
-
         if len(res) >= limit:
             break
-
     return res
 
 
 class Log(BaseModel):
     name: str
     password: str
-
-# SECRET_KEY = config.secret_key
-# session_manager = SessionManager(SECRET_KEY)
-#
-# @app.post('/login')
-# async def login(
-#     response: Response,
-#     Log: Log
-# ):
-#     # Если пришёл JSON через Log
-#     if Log:
-#         username = Log.name
-#         pwd = Log.password
-#
-#     if not username or not pwd:
-#         raise HTTPException(status_code=400, detail="Username and password required")
-#
-#     if username == "admin" and pwd == "secret":
-#         user_id = str(uuid.uuid4())
-#         signed_token = signer.sign(user_id).decode('utf-8')
-#
-#         response.set_cookie(
-#             key="session_token",
-#             value=signed_token,
-#             httponly=True,
-#             secure=False,
-#             samesite="lax",
-#             max_age=3600
-#         )
-#         return {
-#             "message": "Login successful",
-#             "session_token": signed_token,
-#             "user_id": user_id
-#         }
-#
-#     raise HTTPException(status_code=401, detail="Unauthorized")
-
-# @app.get('/profile')
-# async def get_profile(session_token: Optional[str] = Cookie(None)):
-#     if not session_token:
-#         raise HTTPException(status_code=401, detail="Unauthorized: No session token")
-#
-#     try:
-#         user_id = signer.unsign(session_token).decode('utf-8')
-#     except Exception:
-#         raise HTTPException(status_code=401, detail="Unauthorized: Invalid signature")
-#
-#     profile_data = {
-#         "user_id": user_id,
-#         "username": "admin",
-#         "email": "admin@example.com",
-#         "role": "user"
-#     }
-#
-#     return {
-#         "message": "Profile accessed successfully",
-#         "profile": profile_data
-#     }
-
-
-# @app.post('/logout')
-# async def logout(response: Response):
-#     response.delete_cookie("session_token")
-#     return{"message": "Logout successful"}
 
 
 class SessionManager:
@@ -338,37 +265,29 @@ class SessionManager:
         signature = self._create_signature(user_id, timestamp)
         return f"{user_id}.{timestamp}.{signature}"
 
-    def validate_and_refresh_token(self, token: str, current_time: Optional[int] = None) -> tuple[bool, Optional[str], Optional[str], Optional[int]]:
+    def validate_and_refresh_token(self, token: str, current_time: Optional[int] = None) -> tuple[
+        bool, Optional[str], Optional[str], Optional[int]]:
         if current_time is None:
             current_time = int(time.time())
-
         try:
             parts = token.split('.')
             if len(parts) != 3:
                 return False, False, None, None
-
             user_id = parts[0]
             timestamp_str = parts[1]
             provided_signature = parts[2]
-
             try:
                 timestamp = int(timestamp_str)
             except ValueError:
                 return False, False, None, None
-
         except Exception:
             return False, False, None, None
-
         if not self._verify_signature(user_id, timestamp, provided_signature):
             return False, False, None, None
-
         time_since_activity = current_time - timestamp
-
         if time_since_activity > self.session_lifetime:
             return False, False, None, None
-
         should_refresh = time_since_activity >= self.refresh_threshold
-
         new_timestamp = current_time if should_refresh else None
         return True, should_refresh, user_id, new_timestamp
 
@@ -380,27 +299,24 @@ class SessionManager:
 SECRET_KEY = config.secret_key or "your-secret-key-here-change-in-production"
 session_manager = SessionManager(SECRET_KEY)
 
+
 class LoginData(BaseModel):
     name: str
     password: str
 
 
-@app.post('/login')
-async def login(
-    response: Response,
-    login_data: LoginData
+@app.post('/login_session')
+async def login_session(
+        response: Response,
+        login_data: LoginData
 ):
     username = login_data.name
     pwd = login_data.password
-
     if not username or not pwd:
         raise HTTPException(status_code=400, detail="Username and password required")
-
     if username == "admin" and pwd == "secret":
         user_id = str(uuid.uuid4())
-
         session_token = session_manager.create_session_token(user_id)
-
         response.set_cookie(
             key="session_token",
             value=session_token,
@@ -415,25 +331,21 @@ async def login(
             "user_id": user_id,
             "expires_in": 300
         }
-
     raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @app.get('/profile')
 async def get_profile(response: Response, request: Request, session_token: Optional[str] = Cookie(None)):
-
     if not session_token:
-        raise HTTPException(status_code=status.HTTP_401_UNATHORIZED, detail="Unauthorized: No session token")
-
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized: No session token")
     current_time = int(time.time())
-    is_valid, should_refresh, user_id, new_timestamp = session_manager.validate_and_refresh_token(session_token, current_time)
-
+    is_valid, should_refresh, user_id, new_timestamp = session_manager.validate_and_refresh_token(session_token,
+                                                                                                  current_time)
     if not is_valid:
-
         try:
             parts = session_token.split('.')
             if len(parts) == 3:
-                timestamp  = int(parts[1])
+                timestamp = int(parts[1])
                 if current_time - timestamp > session_manager.session_lifetime:
                     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
         except:
@@ -442,10 +354,8 @@ async def get_profile(response: Response, request: Request, session_token: Optio
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid session"
         )
-
     if should_refresh and new_timestamp is not None:
         new_token = session_manager.create_refreshed_token(user_id, new_timestamp)
-
         response.set_cookie(
             key="session_token",
             value=new_token,
@@ -454,9 +364,7 @@ async def get_profile(response: Response, request: Request, session_token: Optio
             samesite="lax",
             max_age=300
         )
-
         logger.info(f"Session refreshed for user {user_id} at timestamp {new_timestamp}")
-
     profile_data = {
         "user_id": user_id,
         "username": "admin",
@@ -465,7 +373,6 @@ async def get_profile(response: Response, request: Request, session_token: Optio
         "session_updated": should_refresh,
         "current_time": current_time
     }
-
     return {
         "message": "Profile accessed successfully",
         "profile": profile_data
@@ -475,13 +382,12 @@ async def get_profile(response: Response, request: Request, session_token: Optio
 @app.post('/logout')
 async def logout(response: Response):
     response.delete_cookie("session_token")
-    return{"message": "Logout successful"}
-
+    return {"message": "Logout successful"}
 
 
 class CommonHeaders(BaseModel):
     user_agent: str = Field(..., alias='User-Agent', description='User-Agent user headers')
-    accept_language: str = Field(..., alias='Accept-Language', description='Accept-Language user geaders')
+    accept_language: str = Field(..., alias='Accept-Language', description='Accept-Language user headers')
 
     class Config:
         populate_by_name = True
@@ -491,9 +397,7 @@ class CommonHeaders(BaseModel):
     def validate_accept_language(cls, v: str) -> str:
         if not v or len(v.strip()) < 2:
             raise ValueError("Invalid Accept-Language format: empty or too short")
-
         parts = v.split(',')
-
         for part in parts:
             part = part.strip()
             if not part:
@@ -502,36 +406,27 @@ class CommonHeaders(BaseModel):
                 lang_part, quality_part = part.split(';', 1)
                 lang_part = lang_part.strip()
                 quality_part = quality_part.strip()
-
                 if not quality_part.startswith('q='):
                     raise ValueError("Invalid Accept-Language format: invalid quality parameter format")
-
                 try:
                     q_value = float(quality_part[2:])
                     if not (0 <= q_value <= 1):
                         raise ValueError("Invalid Accept-Language format: quality value must be between 0 and 1")
                 except ValueError:
                     raise ValueError("Invalid Accept-Language format: invalid quality value")
-
             else:
                 lang_part = part.strip()
-
             if not lang_part:
                 raise ValueError("Invalid Accept-Language format: empty language tag")
-
             if not re.match(r'^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$', lang_part):
                 raise ValueError(f'Invalid Accept-Language format: invalid language tag "{lang_part}"')
-
         return v
 
 
 async def get_common_headers(
-    user_agent: str = Header(..., alias="User-Agent"),
-    accept_language: str = Header(..., alias="Accept-Language")
+        user_agent: str = Header(..., alias="User-Agent"),
+        accept_language: str = Header(..., alias="Accept-Language")
 ) -> CommonHeaders:
-    """
-    Извлекает заголовки из запроса и возвращает модель CommonHeaders
-    """
     return CommonHeaders(
         user_agent=user_agent,
         accept_language=accept_language
@@ -546,10 +441,8 @@ async def get_headers_common(headers: CommonHeaders = Depends(get_common_headers
 @app.get('/info')
 async def get_info(response: Response = None, headers: CommonHeaders = Depends(get_common_headers)):
     server_time = datetime.now().isoformat()
-
     if response:
         response.headers["X-Server-Time"] = server_time
-
     return {
         "message": "Добро пожаловать! Ваши заголовки успешно обработаны.",
         "headers": headers.dict(by_alias=True),
@@ -561,20 +454,16 @@ async def get_info(response: Response = None, headers: CommonHeaders = Depends(g
 async def det_headers(request: Request,
                       user_agent: Optional[str] = Header(None, alias="User-Agent"),
                       accept_language: Optional[str] = Header(None, alias='Accept-Language')):
-
     if user_agent is None:
         raise HTTPException(
             status_code=400,
-            detail="Missing required haider: User-Agent"
-
+            detail="Missing required header: User-Agent"
         )
-
     if accept_language is None:
         raise HTTPException(
             status_code=400,
-            detail='Missing required haider: Accept-Language'
+            detail='Missing required header: Accept-Language'
         )
-
     return {
         "User-Agent": user_agent,
         "Accept-Language": accept_language
@@ -585,10 +474,6 @@ MINIMUM_APP_VERSION = '0.0.2'
 
 
 def compare_versions(current: str, minimum: str) -> bool:
-    """
-    Сравнивает версии.
-    Возвращает True, если current >= minimum
-    """
     try:
         return version.parse(current) >= version.parse(minimum)
     except Exception:
@@ -620,9 +505,7 @@ class CommonHeaders_2(BaseModel):
     def validate_accept_language(cls, v: str) -> str:
         if not v or len(v.strip()) < 2:
             raise ValueError("Invalid Accept-Language format: empty or too short")
-
         parts = v.split(',')
-
         for part in parts:
             part = part.strip()
             if not part:
@@ -631,10 +514,8 @@ class CommonHeaders_2(BaseModel):
                 lang_part, quality_part = part.split(';', 1)
                 lang_part = lang_part.strip()
                 quality_part = quality_part.strip()
-
                 if not quality_part.startswith('q='):
                     raise ValueError("Invalid Accept-Language format: invalid quality parameter format")
-
                 try:
                     q_value = float(quality_part[2:])
                     if not (0 <= q_value <= 1):
@@ -643,33 +524,28 @@ class CommonHeaders_2(BaseModel):
                     raise ValueError("Invalid Accept-Language format: invalid quality value")
             else:
                 lang_part = part.strip()
-
             if not lang_part:
                 raise ValueError("Invalid Accept-Language format: empty language tag")
-
             if not re.match(r'^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$', lang_part):
                 raise ValueError(f'Invalid Accept-Language format: invalid language tag "{lang_part}"')
-
         return v
 
     @validator('x_current_version')
     def validate_version(cls, v: str) -> str:
         if not re.match(r'^\d+\.\d+\.\d+$', v):
             raise ValueError(f'Invalid version format: "{v}". Expected format: X.Y.Z (e.g., 1.2.3)')
-
         if not compare_versions(v, MINIMUM_APP_VERSION):
             raise ValueError(
                 f'Требуется обновить приложение. '
                 f'Ваша версия: {v}, минимальная: {MINIMUM_APP_VERSION}'
             )
-
         return v
 
 
 async def get_common_headers_2(
-    user_agent: str = Header(..., alias="User-Agent"),
-    accept_language: str = Header(..., alias="Accept-Language"),
-    x_current_version: str = Header(..., alias="X-Current-Version")
+        user_agent: str = Header(..., alias="User-Agent"),
+        accept_language: str = Header(..., alias="Accept-Language"),
+        x_current_version: str = Header(..., alias="X-Current-Version")
 ) -> CommonHeaders_2:
     return CommonHeaders_2(
         user_agent=user_agent,
@@ -683,14 +559,13 @@ async def get_headers_common(headers: CommonHeaders_2 = Depends(get_common_heade
     return headers.dict(by_alias=True)
 
 
-@app.get('/info')
-async def get_info(
-    response: Response,
-    headers: CommonHeaders_2 = Depends(get_common_headers_2)
+@app.get('/info_2')
+async def get_info_2(
+        response: Response,
+        headers: CommonHeaders_2 = Depends(get_common_headers_2)
 ):
     server_time = datetime.now().isoformat()
     response.headers["X-Server-Time"] = server_time
-
     return {
         "message": "Добро пожаловать! Ваши заголовки успешно обработаны.",
         "headers": headers.dict(by_alias=True),
@@ -700,35 +575,33 @@ async def get_info(
 
 security = HTTPBasic()
 
+
 class User(BaseModel):
     username: str
     password: str
 
+
 USER_DATA = [
     User(**{"username": "user1", "password": "pass1"}),
     User(**{"username": "user2", "password": "pass2"})
-
 ]
 
 
 @app.get('/login_2')
-async def login(credentials: HTTPBasicCredentials = Depends(security)):
+async def login_basic(credentials: HTTPBasicCredentials = Depends(security)):
     user_found = False
     for user in USER_DATA:
         if user.username == credentials.username and user.password == credentials.password:
             user_found = True
             break
-
     if not user_found:
         headers = {'WWW-Authenticate': "Basic"}
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail='Incorrect date of username',
+            detail='Incorrect username or password',
             headers=headers
         )
-
     return {"message": "You got my secret, welcome"}
-
 
 
 class AuthUserBase(BaseModel):
@@ -755,28 +628,23 @@ def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password_bytes, hashed_bytes)
 
 
-
 fake_users_db: dict[str, AuthUserInDB] = {}
+refresh_tokens_store: dict[str, str] = {}
 
 
 def auth_user(credentials: HTTPBasicCredentials = Depends(security)) -> AuthUserInDB:
     username = credentials.username
     user = fake_users_db.get(username)
-
     if user is None:
-
         fake_password = credentials.password[:72]
         fake_hashed = hash_password("fake")
         verify_password(fake_password, fake_hashed)
-
         headers = {'WWW-Authenticate': "Basic"}
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail='Incorrect username or password',
             headers=headers
         )
-
-
     if not verify_password(credentials.password, user.hashed_password):
         headers = {'WWW-Authenticate': "Basic"}
         raise HTTPException(
@@ -784,8 +652,6 @@ def auth_user(credentials: HTTPBasicCredentials = Depends(security)) -> AuthUser
             detail='Incorrect username or password',
             headers=headers
         )
-
-
     if not secrets.compare_digest(username, user.username):
         headers = {"WWW-Authenticate": "Basic"}
         raise HTTPException(
@@ -793,65 +659,195 @@ def auth_user(credentials: HTTPBasicCredentials = Depends(security)) -> AuthUser
             detail='Incorrect username or password',
             headers=headers
         )
-
     return user
 
 
-
-@app.post("/register")
-async def register(user: AuthUserRegister):
+@app.post("/register_old")
+async def register_old(user: AuthUserRegister):
     if user.username in fake_users_db:
         raise HTTPException(status_code=400, detail="Username already registered")
-
     hashed_password = hash_password(user.password)
-
     fake_users_db[user.username] = AuthUserInDB(
         username=user.username,
         hashed_password=hashed_password
     )
-
     return {"message": f"User {user.username} registered successfully"}
 
 
 @app.get("/login_3")
-async def login(user: AuthUserInDB = Depends(auth_user)):
+async def login_bcrypt(user: AuthUserInDB = Depends(auth_user)):
     return {"message": f"Welcome, {user.username}!"}
 
 
-@app.post("/login_4", response_model=TokenResponse)
-async def login(login_data: LoginRequest):
+@app.post("/register", status_code=status.HTTP_201_CREATED)
+@limiter.limit("1/minute")
+async def register_new(request: Request, user_data: AuthUserRegister):
+    logger.info(f"Registration: {user_data.username}")
+    for existing_username in fake_users_db:
+        if secrets.compare_digest(existing_username, user_data.username):
+            logger.warning(f"User {user_data.username} already exists")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="User already exists"
+            )
+    hashed_password = hash_password(user_data.password)
+    fake_users_db[user_data.username] = AuthUserInDB(
+        username=user_data.username,
+        hashed_password=hashed_password
+    )
+    logger.info(f"User {user_data.username} created")
+    return {"message": "New user created"}
+
+
+@app.post("/login", response_model=TokenResponse)
+@limiter.limit("5/minute")
+async def login(request: Request, login_data: LoginRequest):
     """
-    Этот маршрут проверяет учетные данные пользователя и возвращает JWT токен, если данные правильные.
+    Аутентификация пользователя.
+    Возвращает access_token и refresh_token.
+
+    Ограничение: 5 запросов в минуту
     """
-    # Добавляем логирование для отладки
+    logger.info(f"Login: {login_data.username}")
+
+    user = None
+    for stored_username in fake_users_db:
+        if secrets.compare_digest(stored_username, login_data.username):
+            user = fake_users_db[stored_username]
+            break
+
+    if user is None:
+        logger.warning(f"User {login_data.username} not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    if not verify_password(login_data.password, user.hashed_password):
+        logger.warning(f"Invalid password for {login_data.username}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization failed"
+        )
+
+    access_token = create_access_token(login_data.username)
+    refresh_token = create_refresh_token(login_data.username)
+
+    safe_refresh_token(login_data.username, refresh_token)
+
+    logger.info(f"Tokens created for {login_data.username}")
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+@app.post("/refresh", response_model=TokenResponse)
+@limiter.limit("5/minute")
+async def refresh_tokens(request: Request, refresh_data: RefreshRequest):
+    """
+    Обновление токенов с использованием refresh-токена.
+
+    Шаги:
+    1. Проверяем refresh-токен
+    2. Проверяем, что он сохранён в хранилище
+    3. Удаляем старый токен
+    4. Создаём новую пару токенов
+    5. Сохраняем новый refresh-токен
+
+    Ограничение: 5 запросов в минуту
+    """
+    logger.info("Refresh tokens request")
+
+    refresh_token = refresh_data.refresh_token
+
+    try:
+        payload = verify_refresh_token(refresh_token)
+        username = payload.get("sub")
+    except HTTPException as e:
+        logger.warning(f"Invalid refresh token: {e.detail}")
+        raise e
+
+    if username is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload"
+        )
+
+    if not validate_refresh_token(username, refresh_token):
+        logger.warning(f"Refresh token not found for {username}")
+        delete_refresh_token(username)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token not found or already used"
+        )
+
+    delete_refresh_token(username)
+
+    new_access_token = create_access_token(username)
+    new_refresh_token = create_refresh_token(username)
+
+    safe_refresh_token(username, new_refresh_token)
+
+    logger.info(f"Tokens refreshed for {username}")
+
+    return {
+        "access_token": new_access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer"
+    }
+
+
+@app.post("/login_4", response_model=TokenResponses)
+async def login_4(login_data: LoginRequest):
     print(f"Получен запрос на /login_4")
     print(f"Username: {login_data.username}")
     print(f"Password: {login_data.password}")
 
-    # Проверяем пользователя
-    user_exists = authenticate_user(login_data.username, login_data.password)
-    print(f"Аутентификация: {user_exists}")
+    user = None
+    for stored_username in fake_users_db:
+        if secrets.compare_digest(stored_username, login_data.username):
+            user = fake_users_db[stored_username]
+            break
 
-    if not user_exists:
-        print("Ошибка: Неверные учетные данные")
+    if user is None:
+        print("Ошибка: Пользователь не найден")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    if not verify_password(login_data.password, user.hashed_password):
+        print("Ошибка: Неверный пароль")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
+            detail="Authorization failed",
             headers={"WWW-Authenticate": "Bearer"}
         )
 
     print("Создание JWT токена...")
-    token_data = {"sub": login_data.username}
-    access_token = create_jwt_token(token_data)
+    access_token = create_access_token(login_data.username)
     print(f"Токен создан: {access_token[:50]}...")
 
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token,
+        "refresh_token": create_refresh_token(login_data.username),
+        "token_type": "bearer"
+    }
+
 
 @app.get("/protected_resource")
 async def protected_resource(current_user: str = Depends(get_current_user)):
     """
-        Защищенная конечная точка, доступная только с валидным JWT токеном.
-        """
+    Защищённый маршрут.
+    Доступен только с валидным access-токеном.
+    """
     return {
         "message": "Access grant to protected resource",
         "user": current_user,
@@ -861,15 +857,11 @@ async def protected_resource(current_user: str = Depends(get_current_user)):
 
 @app.get("/about_me")
 async def about_me(current_user: str = Depends(get_current_user)):
-    """
-    Этот маршрут защищен и требует токен. Если токен действителен, мы возвращаем информацию о пользователе.
-    """
     user = None
     for u in USER_DATA:
         if u.get("username") == current_user:
             user = u
             break
-
     if user:
         return {
             "username": user["username"],
@@ -878,15 +870,28 @@ async def about_me(current_user: str = Depends(get_current_user)):
     return {"error": "User not found"}
 
 
+@app.get("/debug/tokens")
+async def debug_tokens():
+    """
+    Отладочный маршрут для просмотра хранилища refresh-токенов.
+    """
+    return {
+        "refresh_tokens_store": refresh_tokens_store,
+        "users": list(fake_users_db.keys())
+    }
 
 
-
-
-
-
-
-
-
+@app.get("/debug/time")
+async def debug_time():
+    """
+    Показывает текущее время сервера для проверки истечения токенов.
+    """
+    from security import ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_MINUT
+    return {
+        "current_time": datetime.utcnow().isoformat(),
+        "access_token_expire_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
+        "refresh_token_expire_minutes": REFRESH_TOKEN_EXPIRE_MINUT
+    }
 
 
 if __name__ == "__main__":

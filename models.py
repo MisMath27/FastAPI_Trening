@@ -2,6 +2,7 @@ from imports import *
 from dotenv import load_dotenv
 from dataclasses import dataclass
 from pydantic_settings import BaseSettings
+import os
 
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
@@ -65,4 +66,22 @@ class TokenResponse(BaseModel):
     token_type: str
 
 
+class AuthUserRegister(BaseModel):
+    username: str
+    password: str
 
+
+class AuthUserInDB(BaseModel):
+    username: str
+    hashed_password: str
+
+
+class RefreshRequest(BaseModel):
+    """Модель для запроса обновления токенов"""
+    refresh_token: str
+
+class TokenResponses(BaseModel):
+    """Модель для ответа с токенами"""
+    access_token: str
+    refresh_token: str
+    token_type: str

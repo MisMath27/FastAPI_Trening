@@ -2,24 +2,39 @@ from imports import *
 import jwt as pyjwt
 
 
-# Параметр tokenUrl указывает маршрут, по которому клиенты смогут получить токен
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login_4")
 
-SECRET_KEY = "your-secret-key-here-change-in-production"  # В реальной практике генерируйте ключ, например, с помощью 'openssl rand -hex 32', и храните его в безопасности
+SECRET_KEY = "your-secret-key-here-change-in-production"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30  # Время жизни токена
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Функция для создания JWT токена с заданным временем жизни
-def create_jwt_token(data: Dict):
-    """
-    Функция для создания JWT токена. Мы копируем входные данные, добавляем время истечения и кодируем токен.
-    """
-    to_encode = data.copy()  # Копируем данные, чтобы не изменить исходный словарь
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)  # Задаем время истечения токена
-    to_encode.update({"exp": expire})  # Добавляем время истечения в данные токена
-    return pyjwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)  # Кодируем токен с использованием секретного ключа и алгоритма
+ACCESS_TOKEN_EXPIRE_MINUT = 1
+REFRESH_TOKEN_EXPIRE_MINUT = 3
 
-# Функция для получения пользователя из токена
+
+def create_jwt_token(data: Dict, expires_delta: timedelta) -> str:
+    """Создаёт JWT токен с указанным временем жизни."""
+    to_encode = data.copy()
+    expire = datetime.utcnow() + expires_delta
+    to_encode.update({"exp": expire})
+    return pyjwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def create_access_token(username: str) -> str:
+    payload = {
+        "sub": username,
+        "type": "access"
+    }
+    return create_jwt_token(payload, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUT))
+
+
+def create_refresh_token(username: str) -> str:
+    payload = {
+        "sub": username,
+        "type": "refresh"
+    }
+    return create_jwt_token(payload, timedelta(minutes=REFRESH_TOKEN_EXPIRE_MINUT))
+
+
 def verify_jwt_token(token: str) -> Dict:
     """
     Функция для извлечения информации о пользователе из токена. Проверяем токен и извлекаем утверждение о пользователе.
@@ -41,6 +56,16 @@ def verify_jwt_token(token: str) -> Dict:
         )
 
 
+def create_jwt_token_with_expiry(data: Dict, expires_delta: timedelta) -> str:
+    """
+    Создаёт JWT токен с указанным временем жизни.
+    """
+    to_encode = data.copy()
+    expire = datetime.utcnow() + expires_delta
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
 def get_current_user(token: str = Depends(oauth2_scheme)):
     payload = verify_jwt_token(token)
     username = payload.get("sub")
@@ -51,3 +76,27 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
             headers={"WWW-Authenticate": "Bearer"}
         )
     return username
+
+
+def verify_refresh_token(token: str) -> Dict:
+    payload = verify_jwt_token(token)
+    token_type = payload.get("type")
+    if token_type != "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type",
+            headers={'WWW-Authenticate': "Bearer"}
+        )
+    return payload
+
+
+oauth3_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
