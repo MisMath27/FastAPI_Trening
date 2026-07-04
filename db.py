@@ -1,11 +1,34 @@
 from imports import *
-from models import AuthUserInDB
+from models import AuthUserInDB, Users
+
 import secrets
 
 
 USERS_DATA = [
-    {"username": "john_doe", "password": "securepassword123"},
-    {"username": "admin", "password": "adminpass"}  # В реальной базе данных пароли должны храниться в виде хэшей
+    {
+        "username": "admin",
+        "password": "adminpass",
+        "roles": ["admin"],
+        "full_name": "Admin User",
+        "email": "admin@example.com",
+        "disabled": False
+    },
+    {
+        "username": "user",
+        "password": "userpass",
+        "roles": ["user"],
+        "full_name": "Regular User",
+        "email": "user@example.com",
+        "disabled": False
+    },
+    {
+        "username": "guest",
+        "password": "guestpass",
+        "roles": ["guest"],
+        "full_name": "Guest User",
+        "email": "guest@example.com",
+        "disabled": False
+    },
 ]
 
 def get_user(username: str):
@@ -69,3 +92,10 @@ def validate_refresh_token(username: str, refresh_token: str) -> bool:
     if stored_token is None:
         return False
     return secrets.compare_digest(stored_token, refresh_token)
+
+
+def get_users(username: str) -> Users:
+    for user_data in USERS_DATA:
+        if user_data["username"] == username:
+            return Users(**{k: v for k, v in user_data.items() if k != "password"})
+    return None

@@ -1,19 +1,25 @@
-from imports import *
-from security import *
+from security import (
+    create_access_token,
+    create_refresh_token,
+    create_jwt_token,
+    verify_refresh_token,
+    verify_password,
+    hash_password,
+    get_user_from_token,
+    ACCESS_TOKEN_EXPIRE_MINUT,
+    ACCESS_TOKEN_EXPIRE_MINUTES
+)
 from db import *
 from models import *
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from models import TokenResponse, RefreshRequest
-from security import (
-    create_access_token,
-    create_refresh_token,
-    get_current_user,
-    verify_refresh_token,
-    verify_password,
-    hash_password
-)
+from models import TokenResponse, RefreshRequest, Users, UserLogin
+from rbac import PermissionChecker
+from dependencies import get_current_user, get_current_user_model
+from security import oauth2_scheme
+
+
 
 
 config = load_config()
@@ -296,7 +302,7 @@ class SessionManager:
         return f"{user_id}.{timestamp}.{signature}"
 
 
-SECRET_KEY = config.secret_key or "your-secret-key-here-change-in-production"
+SECRET_KEY = "your-secret-key-here-change-in-production"
 session_manager = SessionManager(SECRET_KEY)
 
 
@@ -888,10 +894,180 @@ async def debug_time():
     """
     from security import ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_MINUT
     return {
-        "current_time": datetime.utcnow().isoformat(),
+        "current_time": datetime.now().isoformat(),  # ← убрать datetime.
         "access_token_expire_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
         "refresh_token_expire_minutes": REFRESH_TOKEN_EXPIRE_MINUT
     }
+
+
+@app.post("/login_6", response_model=TokenResponse)
+async def login_6(user_in: UserLogin):
+    """Маршрут для аутентификации с ролью"""
+    user = get_user(user_in.username)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found"
+        )
+    if user.get("password") != user_in.password:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials"
+        )
+
+    token_data = {
+        "sub": user_in.username,
+        "roles": user.get("roles", ["user"])
+    }
+    token = create_jwt_token(token_data, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUT))
+    return {"access_token": token, "token_type": "bearer"}
+
+
+@app.get("/admin_only", dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["admin"])
+async def admin_info(current_user: dict = Depends(get_current_user)):
+    """Маршрут для администраторов"""
+    return {
+        "message": "Welcome, Admin! You have full access.",
+        "user": current_user.get("username"),
+        "roles": current_user.get("roles", []),
+        "permissions": ["create", "read", "update", "delete"]
+    }
+
+
+@app.get("/user_only", dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["user", "admin"])
+async def user_info(current_user: dict = Depends(get_current_user)):
+    """Маршрут для пользователей"""
+    return {
+        "message": f"Welcome, {current_user.get('username')}! You have user access.",
+        "user": current_user.get("username"),
+        "roles": current_user.get("roles", []),
+        "permissions": ["read", "update"]
+    }
+
+
+@app.get("/guest_only", dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["guest", "user", "admin"])
+async def guest_only(current_user: dict = Depends(get_current_user)):
+    """Для всех ролей (гости, пользователи, админы)"""
+    return {
+        "message": f"Welcome, {current_user.get('username')}! You have read-only access.",
+        "user": current_user.get("username"),
+        "roles": current_user.get("roles", []),
+        "permissions": ["read"]
+    }
+
+
+@app.get("/my_profile", dependencies=[Depends(oauth2_scheme)])
+async def my_profile(current_user: dict = Depends(get_current_user)):
+    """Показывает профиль текущего пользователя"""
+    return {
+        "username": current_user.get("username"),
+        "roles": current_user.get("roles", []),
+        "full_name": current_user.get("full_name"),
+        "email": current_user.get("email"),
+        "disabled": current_user.get("disabled", False)
+    }
+
+
+@app.post("/admin/create_resource", dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["admin"])
+async def create_resource(
+    resource_data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Создание ресурса (только для администраторов)"""
+    return {
+        "message": "Resource created successfully",
+        "created_by": current_user.get("username"),
+        "resource": resource_data
+    }
+
+
+@app.put("/user/update_resource/{resource_id}", dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["user", "admin"])
+async def update_resource(
+    resource_id: int,
+    resource_data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Обновление ресурса (для пользователей и администраторов)"""
+    return {
+        "message": f"Resource {resource_id} updated successfully",
+        "updated_by": current_user.get("username"),
+        "resource": resource_data
+    }
+
+
+@app.delete("/admin/delete_resource/{resource_id}", dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["admin"])
+async def delete_resource(
+    resource_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Удаление ресурса (только для администраторов)"""
+    return {
+        "message": f"Resource {resource_id} deleted successfully",
+        "deleted_by": current_user.get("username")
+    }
+
+
+@app.get("/guest/read_resource/{resource_id}", dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["guest", "user", "admin"])
+async def read_resource(
+    resource_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Чтение ресурса (для всех ролей)"""
+    return {
+        "message": f"Resource {resource_id} read successfully",
+        "read_by": current_user.get("username"),
+        "roles": current_user.get("roles", []),
+        "resource": {
+            "id": resource_id,
+            "name": f"Sample Resource {resource_id}",
+            "description": "This is a read-only resource for all roles"
+        }
+    }
+
+
+@app.get("/protected_resource_rbac", dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["admin", "user"])
+async def protected_resource_rbac(current_user: dict = Depends(get_current_user)):
+    """Защищённый маршрут. Доступен только admin и user."""
+    return {
+        "message": "Access granted to protected resource",
+        "user": current_user.get("username"),
+        "roles": current_user.get("roles", []),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+@app.get("/debug/roles", dependencies=[Depends(oauth2_scheme)])
+async def debug_roles():
+    """Отладочный маршрут для просмотра всех пользователей и их ролей"""
+    users_with_roles = []
+    for user in USERS_DATA:
+        users_with_roles.append({
+            "username": user.get("username"),
+            "roles": user.get("roles", []),
+            "full_name": user.get("full_name"),
+            "email": user.get("email")
+        })
+    return {
+        "users": users_with_roles,
+        "total_users": len(users_with_roles)
+    }
+
+
+
+
+
+
+
+
+
 
 
 if __name__ == "__main__":

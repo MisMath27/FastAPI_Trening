@@ -85,3 +85,18 @@ class TokenResponses(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str
+
+
+class Users(BaseModel):
+    username: str
+    full_name: str | None = None
+    email: EmailStr | None = None
+    disabled: bool = False
+    roles: list[str] = ["user"]
+
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+
