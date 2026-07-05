@@ -1,6 +1,6 @@
 from imports import *
 from models import AuthUserInDB, Users
-
+from security import hash_password
 import secrets
 
 
@@ -53,7 +53,9 @@ def authenticate_user(username: str, password: str) -> bool:
     return False
 
 
-fake_users_db: dict[str, AuthUserInDB] = {}
+
+
+
 
 def get_user_by_username(username: str) -> Optional[AuthUserInDB]:
     for stored_username in fake_users_db:
@@ -72,7 +74,8 @@ def create_user(username: str, hashed_password: str) -> AuthUserInDB:
     return user
 
 
-refresh_tokens_store: dict[str, str] = {}
+
+
 
 def safe_refresh_token(username: str, refresh_token: str) -> None:
     refresh_tokens_store[username] = refresh_token
@@ -94,8 +97,52 @@ def validate_refresh_token(username: str, refresh_token: str) -> bool:
     return secrets.compare_digest(stored_token, refresh_token)
 
 
-def get_users(username: str) -> Users:
-    for user_data in USERS_DATA:
-        if user_data["username"] == username:
-            return Users(**{k: v for k, v in user_data.items() if k != "password"})
+def get_user(username: str):
+    """
+    Функция для поиска пользователя по имени пользователя.
+    Сначала проверяет fake_users_db, потом USERS_DATA.
+    """
+    if username in fake_users_db:
+        user = fake_users_db[username]
+        return {
+            "username": user.username,
+            "hashed_password": user.hashed_password,
+            "roles": getattr(user, 'roles', ['user']),
+            "full_name": user.username,
+            "email": f"{user.username}@example.com",
+            "disabled": False
+        }
+    for user in USERS_DATA:
+        if user.get("username") == username:
+            return user
+
     return None
+
+
+fake_users_db: dict[str, AuthUserInDB] = {}
+refresh_tokens_store: dict[str, str] = {}
+
+
+if "admin_test" not in fake_users_db:
+    fake_users_db["admin_test"] = AuthUserInDB(
+        username="admin_test",
+        hashed_password=hash_password("admin123"),
+        roles=["admin"]
+    )
+    print("Admin user 'admin_test' created with admin role")
+
+if "user_test" not in fake_users_db:
+    fake_users_db["user_test"] = AuthUserInDB(
+        username="user_test",
+        hashed_password=hash_password("user123"),
+        roles=["user"]
+    )
+    print("User 'user_test' created with user role")
+
+if "guest_test" not in fake_users_db:
+    fake_users_db["guest_test"] = AuthUserInDB(
+        username="guest_test",
+        hashed_password=hash_password("guest123"),
+        roles=["guest"]  # ← ГОСТЬ
+    )
+    print("Guest 'guest_test' created with guest role")

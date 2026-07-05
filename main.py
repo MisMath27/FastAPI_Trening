@@ -620,6 +620,7 @@ class AuthUserRegister(AuthUserBase):
 
 class AuthUserInDB(AuthUserBase):
     hashed_password: str
+    roles: list = []
 
 
 def hash_password(password: str) -> str:
@@ -923,22 +924,27 @@ async def login_6(user_in: UserLogin):
     return {"access_token": token, "token_type": "bearer"}
 
 
-@app.get("/admin_only", dependencies=[Depends(oauth2_scheme)])
-@PermissionChecker(["admin"])
-async def admin_info(current_user: dict = Depends(get_current_user)):
-    """Маршрут для администраторов"""
+@app.get("/guest_only", dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["guest", "user", "admin"])
+@limiter.limit("5/minute")
+async def guest_only(
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
     return {
-        "message": "Welcome, Admin! You have full access.",
+        "message": f"Welcome, {current_user.get('username')}! You have read-only access.",
         "user": current_user.get("username"),
         "roles": current_user.get("roles", []),
-        "permissions": ["create", "read", "update", "delete"]
+        "permissions": ["read"]
     }
-
 
 @app.get("/user_only", dependencies=[Depends(oauth2_scheme)])
 @PermissionChecker(["user", "admin"])
-async def user_info(current_user: dict = Depends(get_current_user)):
-    """Маршрут для пользователей"""
+@limiter.limit("20/minute")
+async def user_info(
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
     return {
         "message": f"Welcome, {current_user.get('username')}! You have user access.",
         "user": current_user.get("username"),
@@ -946,16 +952,18 @@ async def user_info(current_user: dict = Depends(get_current_user)):
         "permissions": ["read", "update"]
     }
 
-
-@app.get("/guest_only", dependencies=[Depends(oauth2_scheme)])
-@PermissionChecker(["guest", "user", "admin"])
-async def guest_only(current_user: dict = Depends(get_current_user)):
-    """Для всех ролей (гости, пользователи, админы)"""
+@app.get("/admin_only", dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["admin"])
+@limiter.limit("1000/minute")
+async def admin_info(
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
     return {
-        "message": f"Welcome, {current_user.get('username')}! You have read-only access.",
+        "message": "Welcome, Admin! You have full access.",
         "user": current_user.get("username"),
         "roles": current_user.get("roles", []),
-        "permissions": ["read"]
+        "permissions": ["create", "read", "update", "delete"]
     }
 
 
@@ -1061,11 +1069,64 @@ async def debug_roles():
     }
 
 
+@app.post("/assign_role/{username}")
+async def assign_role_to_user(
+        username: str,
+        role: str
+):
+    """
+    Назначает роль существующему пользователю.
+    Временный эндпоинт для тестирования.
+    """
+    if username not in fake_users_db:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    user = fake_users_db[username]
+
+    if not hasattr(user, 'roles'):
+        user.roles = []
+
+    if role not in user.roles:
+        user.roles.append(role)
+
+    return {
+        "message": f"Role '{role}' assigned to user '{username}'",
+        "username": username,
+        "roles": user.roles
+    }
 
 
+@app.get("/debug/me")
+async def debug_me(current_user: dict = Depends(get_current_user)):
+    """
+    Показывает информацию о текущем пользователе.
+    Полезно для отладки.
+    """
+    return {
+        "username": current_user.get("username"),
+        "roles": current_user.get("roles", []),
+        "has_roles": "roles" in current_user,
+        "full_user_data": current_user
+    }
 
 
-
+@app.get("/debug/db")
+async def debug_db():
+    """Показывает содержимое fake_users_db"""
+    users = {}
+    for username, user in fake_users_db.items():
+        users[username] = {
+            "username": user.username,
+            "hashed_password": user.hashed_password[:20] + "...",
+            "roles": getattr(user, 'roles', [])
+        }
+    return {
+        "users": users,
+        "total": len(fake_users_db)
+    }
 
 
 
