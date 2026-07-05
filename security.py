@@ -6,9 +6,9 @@ from datetime import timedelta
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login_6")
 SECRET_KEY = "your-secret-key-here-change-in-production"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUT = 1
-REFRESH_TOKEN_EXPIRE_MINUT = 3
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUT = 10
+REFRESH_TOKEN_EXPIRE_MINUT = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440
 
 
 def create_jwt_token(data: Dict, expires_delta: timedelta) -> str:

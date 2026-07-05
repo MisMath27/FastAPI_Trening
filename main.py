@@ -7,7 +7,16 @@ from security import (
     hash_password,
     get_user_from_token,
     ACCESS_TOKEN_EXPIRE_MINUT,
-    ACCESS_TOKEN_EXPIRE_MINUTES
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+)
+from ownership import (
+    OwnershipChecker,
+    resources,
+    get_resource,
+    resource_exists,
+    is_resource_public,
+    can_read_resource,
+    can_write_resource
 )
 from db import *
 from models import *
@@ -1127,6 +1136,144 @@ async def debug_db():
         "users": users,
         "total": len(fake_users_db)
     }
+
+
+@app.get('/protected_resource/{username}', dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["guest", "user", "admin"])
+@limiter.limit('5/minute')
+@OwnershipChecker()
+async def get_protected_resource(
+        request: Request,
+        username: str,
+        current_user: dict = Depends(get_current_user)
+):
+    if not resource_exists(username):
+        raise HTTPException(
+            status_code = status.HTTP_404_VOT_FOUND,
+            detail=f"Resource for user '{username}' not found"
+        )
+    if not can_read_resource(username, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have permission to read this resource"
+        )
+    resource = get_resource(username)
+    return {
+        "message": f"Resource for {username} accesed successfully",
+        "resource": resource,
+        "accessed_bu": current_user.get("username"),
+        "is_public": resource.get("is_public", False)
+    }
+
+
+@app.post('/protected_resource/{username}', dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["user", "admin"])
+@limiter.limit('10/minute')
+@OwnershipChecker()
+async def create_protected_resource(
+        request: Request,
+        username: str,
+        resource_data: dict,
+        current_user: dict = Depends(get_current_user)
+):
+    current_username = current_user.get("username")
+    is_admin = "admin" in current_user.get("roles", [])
+
+    if not is_admin and current_username != username:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only create resources for yourself"
+        )
+    if resource_exists(username):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Resource for user '{username}' already exists"
+        )
+    resources[username] = {
+        "content": resource_data.get("content", ""),
+        "is_public": resource_data.get("is_public", False)
+    }
+    return {
+        "message": F"Resource for {username} created successfully",
+        "resource": resources[username],
+        "created_by": current_username
+    }
+
+
+@app.put("/protected_resource/{username}", dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["user", "admin"])
+@limiter.limit("10/minute")
+@OwnershipChecker()
+async def update_protected_resource(
+    request: Request,
+    username: str,
+    resource_data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    PUT /protected_resource/{username}
+    Доступ: user, admin
+    Лимит: 10/мин
+    Проверка: владение ресурсом или админ
+    """
+    # Проверяем, существует ли ресурс
+    if not resource_exists(username):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Resource for user '{username}' not found"
+        )
+
+    if not can_write_resource(username, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have permission to update this resource"
+        )
+
+    resources[username] = {
+        "content": resource_data.get("content", resources[username].get("content", "")),
+        "is_public": resource_data.get("is_public", resources[username].get("is_public", False))
+    }
+
+    return {
+        "message": f"Resource for {username} updated successfully",
+        "resource": resources[username],
+        "updated_by": current_user.get("username")
+    }
+
+
+@app.delete("/protected_resource/{username}", dependencies=[Depends(oauth2_scheme)])
+@PermissionChecker(["user", "admin"])
+@limiter.limit("5/minute")
+@OwnershipChecker()
+async def delete_protected_resource(
+    request: Request,
+    username: str,
+    current_user: dict = Depends(get_current_user)
+):
+
+    if not resource_exists(username):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Resource for user '{username}' not found"
+        )
+
+    if not can_write_resource(username, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have permission to delete this resource"
+        )
+
+    deleted_resource = resources.pop(username)
+
+    return {
+        "message": f"Resource for {username} deleted successfully",
+        "deleted_resource": deleted_resource,
+        "deleted_by": current_user.get("username")
+    }
+
+
+
+
 
 
 
