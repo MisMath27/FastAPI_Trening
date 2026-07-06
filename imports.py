@@ -25,7 +25,9 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 import jwt
 from fastapi import Depends
-
+from fastapi import FastAPI, Depends
+import sqlite3
+import asyncpg
 
 
 

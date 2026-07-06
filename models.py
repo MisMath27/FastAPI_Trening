@@ -3,6 +3,10 @@ from dotenv import load_dotenv
 from dataclasses import dataclass
 from pydantic_settings import BaseSettings
 import os
+from pydantic import BaseModel, Field
+from datetime import datetime
+from typing import Optional
+
 
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
@@ -100,3 +104,34 @@ class UserLogin(BaseModel):
     password: str
 
 
+class Item(BaseModel):
+    name: str
+
+
+class UserRegister(BaseModel):
+    username: str
+    password: str
+
+
+class TodoCreate(BaseModel):
+    """Модель для создания Todo"""
+    title: str = Field(..., min_length=1, max_length=200, description="Заголовок задачи")
+    description: Optional[str] = Field(None, max_length=1000, description="Описание задачи")
+
+class TodoUpdate(BaseModel):
+    """Модель для обновления Todo"""
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=1000)
+    completed: Optional[bool] = None
+
+class TodoResponse(BaseModel):
+    """Модель для ответа"""
+    id: int
+    title: str
+    description: Optional[str]
+    completed: bool
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True

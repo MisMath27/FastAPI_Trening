@@ -18,12 +18,13 @@ from ownership import (
     can_read_resource,
     can_write_resource
 )
+from database import get_db_connection
 from db import *
 from models import *
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from models import TokenResponse, RefreshRequest, Users, UserLogin
+from models import TokenResponse, RefreshRequest, Users, UserLogin, Item, UserRegister, TodoCreate, TodoUpdate, TodoResponse
 from rbac import PermissionChecker
 from dependencies import get_current_user, get_current_user_model
 from security import oauth2_scheme
@@ -1270,6 +1271,358 @@ async def delete_protected_resource(
         "deleted_resource": deleted_resource,
         "deleted_by": current_user.get("username")
     }
+
+
+@app.post("/items_2")
+def create_item(item: Item):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("INSERT INTO items (name) VALUES (?)", (item.name,))
+    conn.commit()
+    conn.close()
+
+    return {"message": "Item added successfully!"}
+
+
+@app.post("/items_3")
+async def create_item(item: Item, db: asyncpg.Connection = Depends(get_db_connection)):
+    await db.execute('''
+        INSERT INTO items(name) VALUES($1)
+    ''', item.name)
+    return {"message": "Item added successfully!"}
+
+
+@app.post("/register_3", status_code=status.HTTP_201_CREATED)
+@limiter.limit("1/minute")
+async def register_user(request: Request, user_data: UserRegister):
+    """
+    Регистрация нового пользователя в SQLite базе данных.
+
+    Args:
+        user_data: username и password
+
+    Returns:
+        Сообщение об успешной регистрации
+    """
+    logger.info(f"Попытка регистрации пользователя: {user_data.username}")
+
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT id FROM users WHERE username = ?",
+                (user_data.username,)
+            )
+            existing_user = cursor.fetchone()
+
+            if existing_user:
+                logger.warning(f"Пользователь {user_data.username} уже существует")
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Username already exists"
+                )
+
+            cursor.execute(
+                "INSERT INTO users (username, password) VALUES (?, ?)",
+                (user_data.username, user_data.password)
+            )
+            conn.commit()
+
+            logger.info(f"Пользователь {user_data.username} успешно зарегистрирован")
+            return {"message": "User registered successfully!"}
+
+    except sqlite3.IntegrityError as e:
+        logger.error(f"Ошибка целостности БД: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Database integrity error"
+        )
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка базы данных: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error occurred"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred"
+        )
+
+
+@app.post("/todos", response_model=TodoResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
+async def create_todo(request: Request, todo: TodoCreate):
+    logger.info(f"Create Todo: {todo.title}")
+    try:
+        async with get_db_connection() as conn:
+            result = await conn.fetchrow(
+                """
+                INSERT INTO todos (title, description)
+                VALUES ($1, $2)
+                RETURNING id, title, description, completed, created_at, updated_at
+                """,
+                todo.title, todo.description
+            )
+            logger.info(f"Todo create with ID: {result['id']}")
+
+            return TodoResponse(
+                id=result['id'],
+                title=result['title'],
+                description=result['description'],
+                completed=result['completed'],
+                created_at=result['created_at'],
+                updated_at=result['updated_at']
+            )
+
+    except Exception as e:
+        logger.error(f'Error when creating Todo: {e}')
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f'Database error: {str(e)}'
+        )
+
+
+@app.get('/todos/{todo_id}', response_model=TodoResponse)
+@limiter.limit('20/minute')
+async def get_todo(request: Request, todo_id: int):
+    logger.info(f'Getting Todo with ID: {todo_id}')
+    try:
+        async with get_db_connection() as conn:
+            result = await conn.fetchrow(
+                "SELECT * FROM todos WHERE id = $1",
+                todo_id
+            )
+
+            if not result:
+                logger.warning(f'Todo with ID {todo_id} not found')
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f'Todo with id {todo_id} not found'
+                )
+
+            return TodoResponse(
+                id=result['id'],
+                title=result['title'],
+                description=result['description'],
+                completed=result['completed'],
+                created_at=result['created_at'],
+                updated_at=result['updated_at']
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Error when getting Todo: {e}')
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f'Database error: {str(e)}'
+        )
+
+
+@app.put("/todos/{todo_id}", response_model=TodoResponse)
+@limiter.limit("10/minute")
+async def update_todo(request: Request, todo_id: int, todo_update: TodoUpdate):
+    """
+    Обновление существующего Todo.
+
+    - **todo_id**: ID задачи
+    - **title**: Новый заголовок (опционально)
+    - **description**: Новое описание (опционально)
+    - **completed**: Новый статус (опционально)
+    """
+    logger.info(f"Обновление Todo с ID: {todo_id}")
+
+    try:
+        async with get_db_connection() as conn:
+            # Проверяем существование
+            existing = await conn.fetchrow(
+                "SELECT * FROM todos WHERE id = $1",
+                todo_id
+            )
+
+            if not existing:
+                logger.warning(f"Todo с ID {todo_id} не найден для обновления")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Todo with id {todo_id} not found"
+                )
+
+            # Формируем запрос на обновление
+            updates = []
+            params = []
+            param_counter = 1
+
+            if todo_update.title is not None:
+                updates.append(f"title = ${param_counter}")
+                params.append(todo_update.title)
+                param_counter += 1
+
+            if todo_update.description is not None:
+                updates.append(f"description = ${param_counter}")
+                params.append(todo_update.description)
+                param_counter += 1
+
+            if todo_update.completed is not None:
+                updates.append(f"completed = ${param_counter}")
+                params.append(todo_update.completed)
+                param_counter += 1
+
+            if not updates:
+                # Если ничего не обновляется, возвращаем существующую запись
+                return TodoResponse(
+                    id=existing["id"],
+                    title=existing["title"],
+                    description=existing["description"],
+                    completed=existing["completed"],
+                    created_at=existing["created_at"],
+                    updated_at=existing["updated_at"]
+                )
+
+            # Добавляем ID в конец параметров
+            params.append(todo_id)
+
+            query = f"""
+                UPDATE todos 
+                SET {', '.join(updates)}
+                WHERE id = ${param_counter}
+                RETURNING id, title, description, completed, created_at, updated_at
+            """
+
+            result = await conn.fetchrow(query, *params)
+
+            logger.info(f"Todo с ID {todo_id} обновлен")
+
+            return TodoResponse(
+                id=result["id"],
+                title=result["title"],
+                description=result["description"],
+                completed=result["completed"],
+                created_at=result["created_at"],
+                updated_at=result["updated_at"]
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении Todo: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
+
+
+@app.delete("/todos/{todo_id}")
+@limiter.limit("5/minute")
+async def delete_todo(request: Request, todo_id: int):
+    """
+    Удаление Todo по ID.
+
+    - **todo_id**: ID задачи
+    """
+    logger.info(f"Удаление Todo с ID: {todo_id}")
+
+    try:
+        async with get_db_connection() as conn:
+            # Проверяем существование
+            existing = await conn.fetchrow(
+                "SELECT id FROM todos WHERE id = $1",
+                todo_id
+            )
+
+            if not existing:
+                logger.warning(f"Todo с ID {todo_id} не найден для удаления")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Todo with id {todo_id} not found"
+                )
+
+            await conn.execute(
+                "DELETE FROM todos WHERE id = $1",
+                todo_id
+            )
+
+            logger.info(f"Todo с ID {todo_id} удален")
+
+            return {
+                "message": f"Todo with id {todo_id} deleted successfully",
+                "deleted_id": todo_id
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при удалении Todo: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
+
+
+@app.get("/todos", response_model=List[TodoResponse])
+@limiter.limit("20/minute")
+async def get_all_todos(
+        request: Request,
+        completed: Optional[bool] = None,
+        limit: int = 100,
+        offset: int = 0
+):
+    """
+    Получение всех Todo с фильтрацией и пагинацией.
+
+    - **completed**: Фильтр по статусу (опционально)
+    - **limit**: Максимальное количество записей (по умолчанию 100)
+    - **offset**: Смещение для пагинации (по умолчанию 0)
+    """
+    logger.info(f"Получение всех Todo (completed={completed}, limit={limit}, offset={offset})")
+
+    try:
+        async with get_db_connection() as conn:
+            query = "SELECT * FROM todos"
+            params = []
+            param_counter = 1
+
+            if completed is not None:
+                query += f" WHERE completed = ${param_counter}"
+                params.append(completed)
+                param_counter += 1
+
+            query += f" ORDER BY id DESC LIMIT ${param_counter} OFFSET ${param_counter + 1}"
+            params.extend([limit, offset])
+
+            results = await conn.fetch(query, *params)
+
+            return [
+                TodoResponse(
+                    id=row["id"],
+                    title=row["title"],
+                    description=row["description"],
+                    completed=row["completed"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"]
+                )
+                for row in results
+            ]
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении всех Todo: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
+
+
+
+
+
+
+
+
 
 
 
