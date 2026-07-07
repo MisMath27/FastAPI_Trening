@@ -130,8 +130,34 @@ class TodoResponse(BaseModel):
     title: str
     description: Optional[str]
     completed: bool
+    user_id: int
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+
+class TodoCreated(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = Field(None, max_length=1000)
+    user_id: int
+
+
+class TodoUpdated(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = Field(None, max_length=1000)
+    completed: Optional[bool] = None
+    user_id: Optional[int] = None
+
+
+class TodoResponses(BaseModel):
+    id: int
+    title: str
+    description: Optional[str] = None
+    completed: bool
+    user_id: int
+    created_at: datetime
+    updated_at: datetime
+
+

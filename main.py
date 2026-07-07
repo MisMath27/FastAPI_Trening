@@ -18,7 +18,7 @@ from ownership import (
     can_read_resource,
     can_write_resource
 )
-from database import get_db_connection
+from database import get_db_connection, init_db
 from db import *
 from models import *
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -1217,7 +1217,6 @@ async def update_protected_resource(
     Лимит: 10/мин
     Проверка: владение ресурсом или админ
     """
-    # Проверяем, существует ли ресурс
     if not resource_exists(username):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1296,90 +1295,88 @@ async def create_item(item: Item, db: asyncpg.Connection = Depends(get_db_connec
 @app.post("/register_3", status_code=status.HTTP_201_CREATED)
 @limiter.limit("1/minute")
 async def register_user(request: Request, user_data: UserRegister):
-    """
-    Регистрация нового пользователя в SQLite базе данных.
-
-    Args:
-        user_data: username и password
-
-    Returns:
-        Сообщение об успешной регистрации
-    """
     logger.info(f"Попытка регистрации пользователя: {user_data.username}")
 
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
+        async with get_db_connection() as conn:
+            cursor = await conn.cursor()
 
-            cursor.execute(
+            await cursor.execute(
                 "SELECT id FROM users WHERE username = ?",
                 (user_data.username,)
             )
-            existing_user = cursor.fetchone()
+            existing_user = await cursor.fetchone()
 
             if existing_user:
-                logger.warning(f"Пользователь {user_data.username} уже существует")
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="Username already exists"
                 )
 
-            cursor.execute(
+            await cursor.execute(
                 "INSERT INTO users (username, password) VALUES (?, ?)",
                 (user_data.username, user_data.password)
             )
-            conn.commit()
+            await conn.commit()
 
-            logger.info(f"Пользователь {user_data.username} успешно зарегистрирован")
             return {"message": "User registered successfully!"}
 
-    except sqlite3.IntegrityError as e:
-        logger.error(f"Ошибка целостности БД: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Database integrity error"
-        )
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка базы данных: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Database error occurred"
-        )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Неожиданная ошибка: {e}")
+        logger.error(f"Ошибка: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred"
+            detail=f"Database error: {str(e)}"
         )
 
 
 @app.post("/todos", response_model=TodoResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
-async def create_todo(request: Request, todo: TodoCreate):
-    logger.info(f"Create Todo: {todo.title}")
+async def create_todo(request: Request, todo: TodoCreated):
+    logger.info(f"Create Todo: {todo.title} for user_id {todo.user_id}")
     try:
         async with get_db_connection() as conn:
-            result = await conn.fetchrow(
-                """
-                INSERT INTO todos (title, description)
-                VALUES ($1, $2)
-                RETURNING id, title, description, completed, created_at, updated_at
-                """,
-                todo.title, todo.description
+            cursor = await conn.cursor()
+
+            await cursor.execute(
+                "SELECT id FROM users WHERE id = ?",
+                (todo.user_id,)
             )
-            logger.info(f"Todo create with ID: {result['id']}")
+            user = await cursor.fetchone()
+
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f'User with id {todo.user_id} not found'
+                )
+
+            await cursor.execute(
+                """
+                INSERT INTO todos (title, description, user_id)
+                VALUES (?, ?, ?)
+                """,
+                (todo.title, todo.description, todo.user_id)
+            )
+            await conn.commit()
+
+            await cursor.execute(
+                "SELECT id, title, description, completed, user_id, created_at, updated_at FROM todos WHERE id = last_insert_rowid()"
+            )
+            result = await cursor.fetchone()
 
             return TodoResponse(
-                id=result['id'],
-                title=result['title'],
-                description=result['description'],
-                completed=result['completed'],
-                created_at=result['created_at'],
-                updated_at=result['updated_at']
+                id=result[0],
+                title=result[1],
+                description=result[2],
+                completed=bool(result[3]),
+                user_id=result[4],
+                created_at=result[5],
+                updated_at=result[6]
             )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f'Error when creating Todo: {e}')
         raise HTTPException(
@@ -1388,31 +1385,33 @@ async def create_todo(request: Request, todo: TodoCreate):
         )
 
 
-@app.get('/todos/{todo_id}', response_model=TodoResponse)
+@app.get('/todos/{todo_id}', response_model=TodoResponses)
 @limiter.limit('20/minute')
 async def get_todo(request: Request, todo_id: int):
     logger.info(f'Getting Todo with ID: {todo_id}')
     try:
         async with get_db_connection() as conn:
-            result = await conn.fetchrow(
-                "SELECT * FROM todos WHERE id = $1",
-                todo_id
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT id, title, description, completed, user_id, created_at, updated_at FROM todos WHERE id = ?",
+                (todo_id,)
             )
+            result = await cursor.fetchone()
 
             if not result:
-                logger.warning(f'Todo with ID {todo_id} not found')
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f'Todo with id {todo_id} not found'
                 )
 
             return TodoResponse(
-                id=result['id'],
-                title=result['title'],
-                description=result['description'],
-                completed=result['completed'],
-                created_at=result['created_at'],
-                updated_at=result['updated_at']
+                id=result[0],
+                title=result[1],
+                description=result[2],
+                completed=bool(result[3]),
+                user_id=result[4],
+                created_at=result[5],
+                updated_at=result[6]
             )
 
     except HTTPException:
@@ -1425,9 +1424,9 @@ async def get_todo(request: Request, todo_id: int):
         )
 
 
-@app.put("/todos/{todo_id}", response_model=TodoResponse)
+@app.put("/todos/{todo_id}", response_model=TodoResponses)
 @limiter.limit("10/minute")
-async def update_todo(request: Request, todo_id: int, todo_update: TodoUpdate):
+async def update_todo(request: Request, todo_id: int, todo_update: TodoUpdated):
     """
     Обновление существующего Todo.
 
@@ -1436,24 +1435,33 @@ async def update_todo(request: Request, todo_id: int, todo_update: TodoUpdate):
     - **description**: Новое описание (опционально)
     - **completed**: Новый статус (опционально)
     """
-    logger.info(f"Обновление Todo с ID: {todo_id}")
+    logger.info(f"Updating Todo with ID: {todo_id}")
 
     try:
         async with get_db_connection() as conn:
-            # Проверяем существование
             existing = await conn.fetchrow(
-                "SELECT * FROM todos WHERE id = $1",
+                "SELECT * FROM todos WHERE id = ?",
                 todo_id
             )
 
             if not existing:
-                logger.warning(f"Todo с ID {todo_id} не найден для обновления")
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Todo with id {todo_id} not found"
                 )
 
-            # Формируем запрос на обновление
+            if todo_update.user_id is not None:
+                user = await conn.fetchrow(
+                    "SELECT * FROM users WHERE id = ?",
+                    todo_update.user_id
+                )
+
+                if not user:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f'User with id {todo_update.user_id} not found'
+                    )
+
             updates = []
             params = []
             param_counter = 1
@@ -1473,18 +1481,22 @@ async def update_todo(request: Request, todo_id: int, todo_update: TodoUpdate):
                 params.append(todo_update.completed)
                 param_counter += 1
 
+            if todo_update.user_id is not None:
+                updates.append(f'user_id = ${param_counter}')
+                params.append(todo_update.user_id)
+                param_counter += 1
+
             if not updates:
-                # Если ничего не обновляется, возвращаем существующую запись
-                return TodoResponse(
+                return TodoResponses(
                     id=existing["id"],
                     title=existing["title"],
                     description=existing["description"],
                     completed=existing["completed"],
+                    user_id=existing["user_id"],
                     created_at=existing["created_at"],
                     updated_at=existing["updated_at"]
                 )
 
-            # Добавляем ID в конец параметров
             params.append(todo_id)
 
             query = f"""
@@ -1498,11 +1510,12 @@ async def update_todo(request: Request, todo_id: int, todo_update: TodoUpdate):
 
             logger.info(f"Todo с ID {todo_id} обновлен")
 
-            return TodoResponse(
+            return TodoResponses(
                 id=result["id"],
                 title=result["title"],
                 description=result["description"],
                 completed=result["completed"],
+                user_id=result["user_id"],
                 created_at=result["created_at"],
                 updated_at=result["updated_at"]
             )
@@ -1529,9 +1542,8 @@ async def delete_todo(request: Request, todo_id: int):
 
     try:
         async with get_db_connection() as conn:
-            # Проверяем существование
             existing = await conn.fetchrow(
-                "SELECT id FROM todos WHERE id = $1",
+                "SELECT id FROM todos WHERE id = ?",
                 todo_id
             )
 
@@ -1543,7 +1555,7 @@ async def delete_todo(request: Request, todo_id: int):
                 )
 
             await conn.execute(
-                "DELETE FROM todos WHERE id = $1",
+                "DELETE FROM todos WHERE id = ?",
                 todo_id
             )
 
@@ -1564,22 +1576,16 @@ async def delete_todo(request: Request, todo_id: int):
         )
 
 
-@app.get("/todos", response_model=List[TodoResponse])
+@app.get("/todos", response_model=List[TodoResponses])
 @limiter.limit("20/minute")
 async def get_all_todos(
         request: Request,
         completed: Optional[bool] = None,
+        user_id: Optional[int] = None,
         limit: int = 100,
         offset: int = 0
 ):
-    """
-    Получение всех Todo с фильтрацией и пагинацией.
-
-    - **completed**: Фильтр по статусу (опционально)
-    - **limit**: Максимальное количество записей (по умолчанию 100)
-    - **offset**: Смещение для пагинации (по умолчанию 0)
-    """
-    logger.info(f"Получение всех Todo (completed={completed}, limit={limit}, offset={offset})")
+    logger.info(f"Getting all todos (completed={completed}, user_id={user_id}, limit={limit}, offset={offset})")
 
     try:
         async with get_db_connection() as conn:
@@ -1587,10 +1593,20 @@ async def get_all_todos(
             params = []
             param_counter = 1
 
+            where_conditions = []
+
             if completed is not None:
                 query += f" WHERE completed = ${param_counter}"
                 params.append(completed)
                 param_counter += 1
+
+            if user_id is not None:
+                where_conditions.append(f"user_id = ${param_counter}")
+                params.append(user_id)
+                param_counter += 1
+
+            if where_conditions:
+                query += " WHERE " + " AND ".join(where_conditions)
 
             query += f" ORDER BY id DESC LIMIT ${param_counter} OFFSET ${param_counter + 1}"
             params.extend([limit, offset])
@@ -1598,11 +1614,12 @@ async def get_all_todos(
             results = await conn.fetch(query, *params)
 
             return [
-                TodoResponse(
+                TodoResponses(
                     id=row["id"],
                     title=row["title"],
                     description=row["description"],
                     completed=row["completed"],
+                    user_id=row["user_id"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"]
                 )
@@ -1610,14 +1627,62 @@ async def get_all_todos(
             ]
 
     except Exception as e:
-        logger.error(f"Ошибка при получении всех Todo: {e}")
+        logger.error(f"ОError getting todos: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database error: {str(e)}"
         )
 
 
+@app.delete("/users/{user_id}")
+@limiter.limit("5/minute")
+async def delete_user(request: Request, user_id: int):
+    """
+    Удаление пользователя и всех его задач (каскадное удаление).
 
+    - **user_id**: ID пользователя
+
+    При удалении пользователя все связанные задачи удаляются автоматически
+    благодаря ON DELETE CASCADE в БД.
+    """
+    logger.info(f"Deleting user with ID: {user_id}")
+
+    try:
+        async with get_db_connection() as conn:
+            user = await conn.fetchrow(
+                "SELECT id, username FROM users WHERE id = ?",
+                user_id
+            )
+
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User with id {user_id} not found"
+                )
+
+            await conn.execute(
+                "DELETE FROM users WHERE id = ?",
+                user_id
+            )
+
+            logger.info(f"User {user['username']} (ID: {user_id}) deleted with all todos")
+
+            return {
+                "message": "User and associated todos deleted",
+                "deleted_user": {
+                    "id": user["id"],
+                    "username": user["username"]
+                }
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting user: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
 
 
 
