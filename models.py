@@ -154,10 +154,37 @@ class TodoUpdated(BaseModel):
 class TodoResponses(BaseModel):
     id: int
     title: str
-    description: Optional[str] = None
+    description: Optional[str]
     completed: bool
     user_id: int
     created_at: datetime
     updated_at: datetime
+    completed_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class TodoAnalyticsResponse(BaseModel):
+    total: int
+    completed_status: Dict[str, int]
+    avg_completion_time_hours: Optional[float] = None
+    weekday_distribution: Dict[str, int]
+
+
+class BulkUpdateResponse(BaseModel):
+    updated_count: int
+
+
+
+
+
+
+
+
+
+
+
+
 
 
