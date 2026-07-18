@@ -6,7 +6,9 @@ import os
 from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional
-
+from enum import Enum as PyEnum
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import Enum
 
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
@@ -174,6 +176,11 @@ class TodoAnalyticsResponse(BaseModel):
 
 class BulkUpdateResponse(BaseModel):
     updated_count: int
+
+
+
+
+
 
 
 

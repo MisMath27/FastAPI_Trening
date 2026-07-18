@@ -18,5 +18,20 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
 
 
+import os
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+class Settings:
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./test.db")
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "secret")
+    DEBUG: bool = os.getenv("DEBUG", "True").lower() == "true"
+
+
 
 settings = Settings()
+
+
+
