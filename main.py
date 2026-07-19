@@ -18,23 +18,22 @@ from ownership import (
     can_read_resource,
     can_write_resource
 )
+from models import *
 from database import get_db_connection, init_db, Database
 from db import *
-from models import *
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from models import TokenResponse, RefreshRequest, Users, UserLogin, Item, UserRegister, TodoCreate, TodoUpdate, TodoResponse
+from models import TokenResponse, RefreshRequest, Users, UserLogin, Item, UserRegister, TodoCreate, TodoUpdate, TodoResponse, load_config, settings
 from rbac import PermissionChecker
 from dependencies import get_current_user, get_current_user_model
 from security import oauth2_scheme
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from models import (
-    TodoCreate, TodoUpdate, TodoResponse,
-    TodoAnalyticsResponse, BulkUpdateResponse
+    TodoCreate, TodoUpdate, TodoResponse, ItemResponse,
+    TodoAnalyticsResponse, BulkUpdateResponse, ItemCreate
 )
-
 
 
 WEEKDAYS = {
@@ -53,20 +52,20 @@ if MODE not in ['DEV', 'PROD']:
 
 if MODE == 'PROD':
     app = FastAPI(
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
         title="API (PROD)"
     )
-    logger.info("Application started in PROD mode - documentation disabled")
+    logger.info("Application started in PROD mode - documentation enabled")
 else:
     app = FastAPI(
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
         title="API (DEV)"
     )
-    logger.info("Application started in DEV mode - documentation will be protected")
+    logger.info("Application started in DEV mode - documentation enabled")
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
@@ -2119,6 +2118,230 @@ async def register_user(request: Request, user_data: UserRegister):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database error: {str(e)}"
         )
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class CustomExceptionA(HTTPException):
+    def __init__(self, message: str = "Resourse not exist"):
+        self.message = message
+        self.status_code = status.HTTP_409_COMFLICT
+        super().__init__(self.message)
+
+
+class CustomExceptionB(HTTPException):
+    def __init__(self, message: str = "Resourse not exist"):
+        self.message = message
+        self.stastus_code = status.HTTP_404_NOT_FOUND
+        super().__init__(self.message)
+
+
+class ValidationException(Exception):
+    def __init__(self, message: str = "Validation Error"):
+        self.message = message
+        self.status_code = status.HTTP_400_BAD_REQUEST
+        super().__init__(self.message)
+
+
+class ErrorResponse(BaseModel):
+    success: bool = False
+    error: str
+    message: str
+    detail: Optional[str] = None
+    timestamp: str
+
+    class Config:
+        from_atributes = True
+
+
+class ValidationErrorResponse(ErrorResponse):
+    errors: Optional[list] = None
+
+
+# app = FastAPI(
+#     title="API with user processing errors",
+#     description="Example realization users processing and processors",
+#     version="1.0.0",
+# )
+
+
+@app.exception_handler(CustomExceptionA)
+async def custom_exception_a_handler(request: Request, exc: CustomExceptionA):
+    logger.error(f"CustomExceptionA: {exc.message}")
+
+    error_response = ErrorResponse(
+        error="ConflictError",
+        message=exc.message,
+        detail="Resource with such data already exists in the system",
+        timestamp=datetime.now().isoformat()
+    )
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_response.dict(exclude_unset=True),
+    )
+
+
+@app.exception_handler(CustomExceptionB)
+async def custom_exception_b_handler(request: Request, exc: CustomExceptionB):
+    """Обработчик для CustomExceptionB"""
+    logger.error(f"CustomExceptionB: {exc.message}")
+
+    error_response = ErrorResponse(
+        error="NotFoundError",
+        message=exc.message,
+        detail="Запрашиваемый ресурс не найден в системе",
+        timestamp=datetime.now().isoformat()
+    )
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_response.dict()
+    )
+
+
+@app.exception_handler(ValidationException)
+async def validation_exception_handler(request: Request, exc: ValidationException):
+    """Обработчик для ValidationException"""
+    logger.error(f"ValidationException: {exc.message}")
+
+    error_response = ValidationErrorResponse(
+        error="ValidationError",
+        message=exc.message,
+        detail="Проверьте правильность введённых данных",
+        timestamp=datetime.now().isoformat()
+    )
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_response.dict()
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Обработчик для стандартных HTTPException"""
+    logger.error(f"HTTPException: {exc.detail}")
+
+    error_response = ErrorResponse(
+        error="HTTPError",
+        message=exc.detail if isinstance(exc.detail, str) else str(exc.detail),
+        timestamp=datetime.now().isoformat()
+    )
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_response.dict()
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Обработчик для всех остальных исключений"""
+    logger.error(f"Необработанное исключение: {str(exc)}")
+
+    error_response = ErrorResponse(
+        error="InternalServerError",
+        message="Внутренняя ошибка сервера",
+        detail=str(exc) if app.debug else None,
+        timestamp=datetime.now().isoformat()
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=error_response.dict()
+    )
+
+
+items_db = {}
+item_counter = 1
+
+
+@app.get('/_2')
+async def root():
+    return {
+        "message": "welcom api with users processing errors",
+        'endpoints': {
+            "POST /items": "Create a new item",
+            "GET /items/{item_id}": "Get item by id",
+            "DELETE /items/{item_id}": "Delete item by id",
+        }
+    }
+
+
+@app.post("/items", response_model=ItemResponse, status_code=status.HTTP_201_CREATED)
+async def create_item(item: ItemCreate):
+    """Создание нового элемента"""
+    global item_counter
+
+    for existing_item in items_db.values():
+        if existing_item["name"].lower() == item.name.lower():
+            raise CustomExceptionA(f"Элемент с именем '{item.name}' уже существует")
+
+    if item.price <= 0:
+        raise ValidationException("Цена должна быть больше 0")
+
+    if len(item.name) < 3:
+        raise ValidationException("Имя должно содержать минимум 3 символа")
+
+    item_id = item_counter
+    item_counter += 1
+
+    new_item = {
+        "id": item_id,
+        "name": item.name,
+        "price": item.price,
+        "description": item.description,
+        "created_at": datetime.now().isoformat()
+    }
+
+    items_db[item_id] = new_item
+
+    return new_item
+
+
+@app.get("/items/{item_id}", response_model=ItemResponse)
+async def get_item(item_id: int):
+    """Получение элемента по ID"""
+    if item_id not in items_db:
+        raise CustomExceptionB(f"Элемент с ID {item_id} не найден")
+
+    return items_db[item_id]
+
+
+@app.delete("/items/{item_id}")
+async def delete_item(item_id: int):
+    """Удаление элемента по ID"""
+    if item_id not in items_db:
+        raise CustomExceptionB(f"Элемент с ID {item_id} не найден")
+
+    deleted_item = items_db.pop(item_id)
+
+    return {
+        "success": True,
+        "message": f"Элемент с ID {item_id} успешно удалён",
+        "deleted_item": deleted_item
+    }
+
+
+@app.get("/items_8")
+async def list_items():
+    """Получение списка всех элементов"""
+    return {
+        "items": list(items_db.values()),
+        "count": len(items_db)
+    }
+
+
+
+
+
+
+
+
+
 
 
 

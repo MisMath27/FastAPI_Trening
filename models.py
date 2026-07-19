@@ -30,7 +30,6 @@ class Config:
 
 
 def load_config(path: str = None) -> Config:
-    # Загружаем .env файл
     if path is None:
         path = os.path.join(os.path.dirname(__file__), ".env")
     load_dotenv(path)
@@ -178,6 +177,18 @@ class BulkUpdateResponse(BaseModel):
     updated_count: int
 
 
+class ItemCreate(BaseModel):
+    name: str
+    price: float
+    description: Optional[str] = None
+
+
+class ItemResponse(BaseModel):
+    id: int
+    name: str
+    price: float
+    description: Optional[str]
+    created_at: str
 
 
 
