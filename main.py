@@ -18,6 +18,7 @@ from ownership import (
     can_read_resource,
     can_write_resource
 )
+import random
 from models import *
 from database import get_db_connection, init_db, Database
 from db import *
@@ -2335,9 +2336,56 @@ async def list_items():
     }
 
 
+from loguru import logger
+
+class CustomAppError(Exception):
+    def __init__(self, message: str, code: int = 400):
+        self.message = message
+        self.code = code
+        super().__init__(message)
+
+@app.get('/ok')
+async def ok():
+    return {"status": "ok"}
+
+@app.get("/error")
+async def error():
+    raise CustomAppError("Demonstration error", code=418)
+
+@app.get("/boom")
+async def boom():
+    def div_by_zero():
+        return 1 / 0
+
+    def key_err():
+        return {}["missing"]
+
+    def value_err():
+        return int("not-an-int")
+
+    def runtime_err():
+        raise RuntimeError("Random error")
+
+    random.choice([div_by_zero, key_err, value_err, runtime_err])()
+    return {"status": "unreachable"}
 
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.bind(
+        method=request.method,
+        path=request.url.path,
+        client_host=request.client.host,
+    ).exception(f"Ann error occurred: {exc}")
 
+    return JSONResponse(
+        status_code=500,
+        content={
+        "status_code": 500,
+        "message": "Internal server error",
+        "detail": str(exc)
+    }
+    )
 
 
 
