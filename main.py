@@ -2335,58 +2335,202 @@ async def list_items():
         "count": len(items_db)
     }
 
+from core.logger import log_error, logger
+import uuid
+import traceback
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
 
-from loguru import logger
 
 class CustomAppError(Exception):
-    def __init__(self, message: str, code: int = 400):
+    def __init__(self, message: str, code: int = 418):
         self.message = message
         self.code = code
         super().__init__(message)
 
-@app.get('/ok')
-async def ok():
-    return {"status": "ok"}
+
+@app.exception_handler(CustomAppError)
+async def custom_app_error_handler(request, exc: CustomAppError):
+    return JSONResponse(
+        status_code=exc.code,
+        content={"detail": exc.message, "code": exc.code}
+    )
+
+
+# Обработчик для CustomAppError
+@app.exception_handler(CustomAppError)
+async def custom_app_error_handler(request: Request, exc: CustomAppError):
+    """Обработчик кастомных ошибок приложения"""
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+
+    log_error(
+        request=request,
+        exc=exc,
+        status_code=exc.code,
+        request_id=request_id,
+        extra_context={"custom_error": True},
+    )
+
+    return JSONResponse(
+        status_code=exc.code,
+        content={
+            "request_id": request_id,
+            "status_code": exc.code,
+            "message": exc.message,
+        }
+    )
+
+
+# Обработчик HTTPException
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Обработчик стандартных HTTP исключений"""
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+
+    log_error(
+        request=request,
+        exc=exc,
+        status_code=exc.status_code,
+        request_id=request_id,
+    )
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "request_id": request_id,
+            "status_code": exc.status_code,
+            "message": exc.detail if isinstance(exc.detail, str) else str(exc.detail),
+        }
+    )
+
+
+# Обработчик ValidationException
+@app.exception_handler(ValidationException)
+async def validation_exception_handler(request: Request, exc: ValidationException):
+    """Обработчик ошибок валидации"""
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+
+    log_error(
+        request=request,
+        exc=exc,
+        status_code=exc.status_code,
+        request_id=request_id,
+        extra_context={"validation_error": True},
+    )
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "request_id": request_id,
+            "status_code": exc.status_code,
+            "message": exc.message,
+        }
+    )
+
+
+# Обработчик RateLimitExceeded
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """Обработчик превышения лимита запросов"""
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+
+    log_error(
+        request=request,
+        exc=exc,
+        status_code=429,
+        request_id=request_id,
+        extra_context={"rate_limit": True},
+    )
+
+    return JSONResponse(
+        status_code=429,
+        content={
+            "request_id": request_id,
+            "status_code": 429,
+            "message": "Too Many Requests",
+        }
+    )
+
+
+# main.py - добавьте эти эндпоинты для тестирования
+
+@app.get("/ok")
+async def ok_endpoint():
+    """Успешный запрос"""
+    return {"status": "ok", "message": "Everything is fine"}
+
 
 @app.get("/error")
-async def error():
-    raise CustomAppError("Demonstration error", code=418)
+async def error_endpoint():
+    """Кастомная ошибка (418 I'm a teapot)"""
+    raise CustomAppError("I'm a teapot", code=418)
+
 
 @app.get("/boom")
-async def boom():
+async def boom_endpoint():
+    """Неожиданная ошибка"""
     def div_by_zero():
         return 1 / 0
 
-    def key_err():
+    def key_error():
         return {}["missing"]
 
-    def value_err():
-        return int("not-an-int")
+    def value_error():
+        return int("not-a-number")
 
-    def runtime_err():
-        raise RuntimeError("Random error")
+    def runtime_error():
+        raise RuntimeError("Something went wrong!")
 
-    random.choice([div_by_zero, key_err, value_err, runtime_err])()
+    import random
+    func = random.choice([div_by_zero, key_error, value_error, runtime_error])
+    func()
     return {"status": "unreachable"}
 
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.bind(
-        method=request.method,
-        path=request.url.path,
-        client_host=request.client.host,
-    ).exception(f"Ann error occurred: {exc}")
-
-    return JSONResponse(
-        status_code=500,
-        content={
-        "status_code": 500,
-        "message": "Internal server error",
-        "detail": str(exc)
+@app.get("/echo")
+async def echo_endpoint(
+    request: Request,
+    name: str = Query("world"),
+    age: int = Query(None)
+):
+    """Эхо-эндпоинт для проверки логирования"""
+    return {
+        "message": f"Hello, {name}!",
+        "age": age,
+        "headers": {k: v for k, v in request.headers.items()},
+        "query_params": dict(request.query_params),
     }
-    )
 
+
+@app.post("/submit")
+async def submit_endpoint(request: Request, data: dict):
+    """Эндпоинт для проверки логирования тела"""
+    # Искусственная ошибка для теста
+    if "error" in data:
+        raise ValueError("Intentional error in submit handler")
+    return {"received": data, "status": "ok"}
+
+
+@app.post("/upload")
+async def upload_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    description: str = Form(None)
+):
+    """Эндпоинт для загрузки файлов"""
+    content = await file.read()
+    if len(content) > 0:
+        # Искусственная ошибка для теста
+        if description and "error" in description:
+            raise RuntimeError("Intentional error in upload handler")
+        return {
+            "filename": file.filename,
+            "size": len(content),
+            "content_type": file.content_type,
+            "description": description,
+            "status": "ok"
+        }
+    raise HTTPException(status_code=400, detail="Empty file")
 
 
 
