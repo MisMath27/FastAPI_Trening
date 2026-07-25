@@ -1,3 +1,4 @@
+
 from security import (
     create_access_token,
     create_refresh_token,
@@ -29,12 +30,32 @@ from models import TokenResponse, RefreshRequest, Users, UserLogin, Item, UserRe
 from rbac import PermissionChecker
 from dependencies import get_current_user, get_current_user_model
 from security import oauth2_scheme
-from datetime import datetime, date, timedelta
-from zoneinfo import ZoneInfo
 from models import (
     TodoCreate, TodoUpdate, TodoResponse, ItemResponse,
     TodoAnalyticsResponse, BulkUpdateResponse, ItemCreate
 )
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, EmailStr, conint, constr, ValidationError
+import re
+from typing import Optional, List, Annotated, Dict
+from datetime import datetime, timedelta
+from http.client import HTTPException
+from fastapi import FastAPI, Query, File, UploadFile, HTTPException, Cookie, Depends, Response, Form, status, Request, Header
+from pydantic import BaseModel, EmailStr, Field, validator
+import logger
+import logging
+import hashlib
+import hmac
+import time
+from packaging import version
+from fastapi.security import HTTPBasic, HTTPBasicCredentials, OAuth2PasswordBearer
+import secrets
+import bcrypt
+from fastapi import FastAPI, Depends
+import asyncpg
+from zoneinfo import ZoneInfo
+
+
 
 
 WEEKDAYS = {
@@ -2531,6 +2552,265 @@ async def upload_endpoint(
             "status": "ok"
         }
     raise HTTPException(status_code=400, detail="Empty file")
+
+
+class ValidationErrorItem(BaseModel):
+    """Детальная ошибка по полю"""
+    field: str = Field(..., description="Имя поля, где произошла ошибка")
+    message: str = Field(..., description="Сообщение об ошибке")
+    code: str = Field(..., description="Код ошибки")
+
+
+class ProblemDetails(BaseModel):
+    """
+    Модель ошибки по стандарту RFC 7807 (Problem Details)
+    """
+    type: str = Field(
+        default="https://example.com/problems/validation-error",
+        description="URI типа ошибки"
+    )
+    title: str = Field(
+        default="Validation Error",
+        description="Краткое название ошибки"
+    )
+    status: int = Field(
+        default=422,
+        description="HTTP статус-код"
+    )
+    detail: str = Field(
+        default="The request body failed validation.",
+        description="Подробное описание ошибки"
+    )
+    instance: str = Field(
+        default="/users",
+        description="URI запроса, вызвавшего ошибку"
+    )
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now().isoformat(),
+        description="Время возникновения ошибки"
+    )
+    errors: Optional[List[ValidationErrorItem]] = Field(
+        default=None,
+        description="Список ошибок по полям"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "type": "https://example.com/problems/validation-error",
+                "title": "Validation Error",
+                "status": 422,
+                "detail": "The request body failed validation.",
+                "instance": "/users",
+                "timestamp": "2026-07-25T12:34:56.789Z",
+                "errors": [
+                    {"field": "age", "message": "ensure this value is greater than 18", "code": "greater_than"},
+                    {"field": "email", "message": "value is not a valid email address", "code": "email"},
+                    {"field": "password", "message": "ensure this value has at least 8 characters",
+                     "code": "min_length"}
+                ]
+            }
+        }
+
+
+
+class UserCreate(BaseModel):
+    """Модель для создания пользователя"""
+    username: str = Field(..., min_length=3, max_length=50, description="Имя пользователя")
+    age: conint(gt=18, lt=120) = Field(..., description="Возраст (должен быть > 18)")
+    email: EmailStr = Field(..., description="Email адрес")
+    password: constr(min_length=8, max_length=16) = Field(..., description="Пароль (8-16 символов)")
+    phone: Optional[str] = Field(default="Unknown", max_length=20, description="Телефон (опционально)")
+
+
+class UserResponse(BaseModel):
+    """Модель успешного ответа"""
+    id: int = Field(..., description="ID пользователя")
+    username: str = Field(..., description="Имя пользователя")
+    email: str = Field(..., description="Email пользователя")
+    created_at: str = Field(..., description="Дата создания")
+
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """
+    Обработчик ошибок валидации Pydantic.
+    Возвращает ответ в формате Problem Details (RFC 7807).
+    """
+    # Формируем список ошибок по полям
+    errors = []
+    for error in exc.errors():
+        # Извлекаем имя поля
+        field = ".".join(str(loc) for loc in error["loc"])
+        # Получаем сообщение об ошибке
+        message = error["msg"]
+        # Получаем код ошибки
+        code = error.get("type", "unknown")
+
+        errors.append(ValidationErrorItem(
+            field=field,
+            message=message,
+            code=code
+        ))
+
+    # Создаем объект Problem Details
+    problem = ProblemDetails(
+        type="https://example.com/problems/validation-error",
+        title="Validation Error",
+        status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail="The request body failed validation. Please check the errors field for details.",
+        instance=request.url.path,
+        timestamp=datetime.now().isoformat(),
+        errors=errors
+    )
+
+    # Возвращаем ответ с правильным медиатипом
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content=problem.model_dump(mode='json'),
+        media_type="application/problem+json"
+    )
+
+
+users_db = {}
+user_id_counter = 1
+
+@app.post(
+    "/users",
+    response_model=UserResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Создание пользователя",
+    description="Создает нового пользователя с валидацией данных",
+    responses={
+        200: {
+            "description": "Пользователь успешно создан",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "id": 1,
+                        "username": "alice",
+                        "email": "alice@example.com",
+                        "created_at": "2026-07-25T12:34:56.789Z"
+                    }
+                }
+            }
+        },
+        422: {
+            "description": "Ошибка валидации данных",
+            "content": {
+                "application/problem+json": {
+                    "schema": ProblemDetails.model_json_schema(),
+                    "examples": {
+                        "validation_error": {
+                            "summary": "Ошибка валидации",
+                            "description": "Пример ответа при невалидных данных",
+                            "value": {
+                                "type": "https://example.com/problems/validation-error",
+                                "title": "Validation Error",
+                                "status": 422,
+                                "detail": "The request body failed validation. Please check the errors field for details.",
+                                "instance": "/users",
+                                "timestamp": "2026-07-25T12:34:56.789Z",
+                                "errors": [
+                                    {
+                                        "field": "body.age",
+                                        "message": "Input should be greater than 18",
+                                        "code": "greater_than"
+                                    },
+                                    {
+                                        "field": "body.email",
+                                        "message": "value is not a valid email address",
+                                        "code": "value_error"
+                                    },
+                                    {
+                                        "field": "body.password",
+                                        "message": "String should have at least 8 characters",
+                                        "code": "string_too_short"
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+)
+async def create_user(user: UserCreate) -> UserResponse:
+    """
+    Создание нового пользователя.
+
+    Args:
+        user: Данные пользователя (username, age, email, password, phone)
+
+    Returns:
+        UserResponse: Данные созданного пользователя
+
+    Raises:
+        ValidationError: Если данные не прошли валидацию
+    """
+    global user_id_counter
+
+    # Проверка на существование пользователя (дополнительная валидация)
+    for existing_user in users_db.values():
+        if existing_user["username"].lower() == user.username.lower():
+            # Бросаем HTTPException с 409 Conflict
+            # Но для этого задания оставляем только 422
+            pass
+
+    # Создаем пользователя
+    user_id = user_id_counter
+    user_id_counter += 1
+
+    new_user = {
+        "id": user_id,
+        "username": user.username,
+        "email": user.email,
+        "created_at": datetime.now().isoformat()
+    }
+
+    users_db[user_id] = {
+        "id": user_id,
+        "username": user.username,
+        "age": user.age,
+        "email": user.email,
+        "password": user.password,
+        "phone": user.phone,
+        "created_at": new_user["created_at"]
+    }
+
+    return UserResponse(
+        id=user_id,
+        username=user.username,
+        email=user.email,
+        created_at=new_user["created_at"]
+    )
+
+
+@app.get("/", summary="Корневой эндпоинт")
+async def root():
+    return {
+        "message": "User API with Problem Details",
+        "docs": "/docs",
+        "redoc": "/redoc"
+    }
+
+
+@app.get("/users", summary="Получение всех пользователей")
+async def get_users():
+    return {
+        "users": list(users_db.values()),
+        "count": len(users_db)
+    }
+
+
+
+
+
+
+
+
 
 
 
