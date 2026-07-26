@@ -2805,6 +2805,441 @@ async def get_users():
     }
 
 
+class ErrorResponseModel(BaseModel):
+    status_code: int = Field(..., description="HTTP status-code")
+    message: str = Field(..., description="Message error")
+    error_code: str = Field(..., description="Error code for authentication")
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat(), description="Time error")
+    request_id: Optional[str] = Field(None, description="ID request for tracin")
+    detail: Optional[str] = Field(None, description="Additional details")
+
+    class Config:
+        json_schema_axtra = {
+            "example": {
+                "status_code": 404,
+                "message": "User not found",
+                "error_code": "USER_NOT_FOUND",
+                "timestamp": "2026-07-26",
+                "request_id": "132",
+                "detail": "User with Id 132 does not exist"
+            }
+        }
+
+
+class ValidationErrorDetail(BaseModel):
+    field: str = Field(..., description="Name field, where did it happen error")
+    message: str = Field(..., description="Error message")
+    error_code: str = Field(..., description="Error code for authentication")
+
+
+class ValidationErrorResponseModel(ErrorResponseModel):
+    errors: Optional[List[ValidationErrorDetail]] = Field(None, description="Error list by field")
+    class Cofig:
+        json_schema_extra = {
+            "example": {
+                "status_code": 422,
+                "message": "Validation error date",
+                "error_code": "VALIDATION_ERROR",
+                "timestamp": "2026-07-25T12:34:56.789Z",
+                "request_id": "132",
+                "errors": [
+                    {
+                        "field": "age",
+                        "message": "Input should be greater than 18",
+                        "error_code": "greater_than"
+                    },
+                    {
+                        "field": "email",
+                        "message": "not a valid email address",
+                        "error_code": "email"
+                    }
+                ]
+            }
+        }
+
+
+class AppException(Exception):
+    """Базовое исключение приложения"""
+    def __init__(self, message: str, error_code: str, status_code: int):
+        self.message = message
+        self.error_code = error_code
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class UserNotFoundException(AppException):
+    """Исключение: пользователь не найден"""
+
+    def __init__(self, user_id: Optional[int] = None, username: Optional[str] = None):
+        if user_id:
+            message = f"User with ID {user_id} not found"
+            detail = f"User ID: {user_id}"
+        elif username:
+            message = f"User with username '{username}' not found"
+            detail = f"Username: {username}"
+        else:
+            message = "User not found"
+            detail = None
+
+        self.detail = detail
+        super().__init__(
+            message=message,
+            error_code="USER_NOT_FOUND",
+            status_code=status.HTTP_404_NOT_FOUND
+        )
+
+
+class InvalidUserDataException(AppException):
+    """Исключение: невалидные данные пользователя"""
+    def __init__(self, message: str, field: Optional[str] = None):
+        self.field = field
+        super().__init__(
+            message=message,
+            error_code="INVALID_USER_DATA",
+            status_code=status.HTTP_400_BAD_REQUEST
+        )
+
+
+class UserAlreadyExistsException(AppException):
+    """Исключение: пользователь уже существует"""
+    def __init__(self, username: str):
+        self.username = username
+        super().__init__(
+            message=f"User with username '{username}' already exists",
+            error_code="USER_ALREADY_EXISTS",
+            status_code=status.HTTP_409_CONFLICT
+        )
+
+
+class AccessDeniedException(AppException):
+    """Исключение: доступ запрещен"""
+    def __init__(self, message: str = "Access denied"):
+        super().__init__(
+            message=message,
+            error_code="ACCESS_DENIED",
+            status_code=status.HTTP_403_FORBIDDEN
+        )
+
+
+class ResourceNotFoundException(AppException):
+    """Исключение: ресурс не найден"""
+    def __init__(self, resource_type: str, resource_id: int):
+        super().__init__(
+            message=f"{resource_type} with ID {resource_id} not found",
+            error_code="RESOURCE_NOT_FOUND",
+            status_code=status.HTTP_404_NOT_FOUND
+        )
+
+
+class InvalidCredentialsException(AppException):
+    """Исключение: неверные учетные данные"""
+    def __init__(self):
+        super().__init__(
+            message="Invalid username or password",
+            error_code="INVALID_CREDENTIALS",
+            status_code=status.HTTP_401_UNAUTHORIZED
+        )
+
+
+class TokenExpiredException(AppException):
+    """Исключение: токен истек"""
+    def __init__(self):
+        super().__init__(
+            message="Token has expired",
+            error_code="TOKEN_EXPIRED",
+            status_code=status.HTTP_401_UNAUTHORIZED
+        )
+
+
+class RateLimitExceededException(AppException):
+    """Исключение: превышен лимит запросов"""
+    def __init__(self):
+        super().__init__(
+            message="Too many requests. Please try again later.",
+            error_code="RATE_LIMIT_EXCEEDED",
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS
+        )
+
+
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+import time
+import uuid
+
+
+@app.middleware("http")
+async def add_request_id_middleware(request: Request, call_next):
+    """Middleware для добавления ID запроса"""
+    # Проверяем, есть ли уже Request-ID в заголовках
+    request_id = request.headers.get("X-Request-ID")
+    if not request_id:
+        # Генерируем новый ID
+        request_id = str(uuid.uuid4())[:8]
+
+    # Сохраняем в state для использования в обработчиках
+    request.state.request_id = request_id
+
+    # Добавляем в заголовки ответа
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+
+    return response
+
+
+@app.exception_handler(AppException)
+async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
+    """Обработчик для всех кастомных исключений приложения"""
+    start_time = time.time()
+
+    # Логируем ошибку
+    logger.error(f"AppException: {exc.error_code} - {exc.message}")
+
+    # Получаем request_id
+    request_id = getattr(request.state, 'request_id', None) or str(hash(request))
+
+    # Создаем ответ
+    error_response = ErrorResponseModel(
+        status_code=exc.status_code,
+        message=exc.message,
+        error_code=exc.error_code,
+        request_id=request_id,
+        detail=getattr(exc, 'detail', None)
+    )
+
+    response = JSONResponse(
+        status_code=exc.status_code,
+        content=error_response.model_dump()
+    )
+
+    # Добавляем время обработки
+    processing_time = (time.time() - start_time) * 1000
+    response.headers["X-ErrorHandleTime"] = f"{processing_time:.2f}ms"
+
+    return response
+
+
+@app.exception_handler(UserNotFoundException)
+async def user_not_found_handler(request: Request, exc: UserNotFoundException) -> JSONResponse:
+    """Обработчик для UserNotFoundException"""
+    start_time = time.time()
+
+    logger.warning(f"UserNotFoundException: {exc.message}")
+
+    request_id = getattr(request.state, 'request_id', None) or str(hash(request))
+
+    error_response = ErrorResponseModel(
+        status_code=exc.status_code,
+        message=exc.message,
+        error_code=exc.error_code,
+        request_id=request_id,
+        detail=exc.detail
+    )
+
+    response = JSONResponse(
+        status_code=exc.status_code,
+        content=error_response.model_dump()
+    )
+
+    processing_time = (time.time() - start_time) * 1000
+    response.headers["X-ErrorHandleTime"] = f"{processing_time:.2f}ms"
+
+    return response
+
+
+@app.exception_handler(InvalidUserDataException)
+async def invalid_user_data_handler(request: Request, exc: InvalidUserDataException) -> JSONResponse:
+    """Обработчик для InvalidUserDataException"""
+    start_time = time.time()
+
+    logger.warning(f"InvalidUserDataException: {exc.message} (field: {exc.field})")
+
+    request_id = getattr(request.state, 'request_id', None) or str(hash(request))
+
+    # Создаем детальную информацию об ошибке
+    errors = None
+    if exc.field:
+        errors = [ValidationErrorDetail(
+            field=exc.field,
+            message=exc.message,
+            error_code=exc.error_code
+        )]
+
+    error_response = ValidationErrorResponseModel(
+        status_code=exc.status_code,
+        message=exc.message,
+        error_code=exc.error_code,
+        request_id=request_id,
+        detail=f"Field: {exc.field}" if exc.field else None,
+        errors=errors
+    )
+
+    response = JSONResponse(
+        status_code=exc.status_code,
+        content=error_response.model_dump()
+    )
+
+    processing_time = (time.time() - start_time) * 1000
+    response.headers["X-ErrorHandleTime"] = f"{processing_time:.2f}ms"
+
+    return response
+
+
+@app.exception_handler(RequestValidationError)
+async def custom_validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Обработчик для ошибок валидации Pydantic с Problem Details"""
+    start_time = time.time()
+
+    logger.warning(f"ValidationError: {exc.errors()}")
+
+    request_id = getattr(request.state, 'request_id', None) or str(hash(request))
+
+    # Преобразуем ошибки Pydantic в наш формат
+    errors = []
+    for error in exc.errors():
+        # Извлекаем имя поля
+        field = ".".join(str(loc) for loc in error["loc"])
+        # Получаем сообщение об ошибке
+        message = error["msg"]
+        # Получаем код ошибки
+        error_code = error.get("type", "validation_error")
+
+        errors.append(ValidationErrorDetail(
+            field=field,
+            message=message,
+            error_code=error_code
+        ))
+
+    error_response = ValidationErrorResponseModel(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        message="Validation error in request data",
+        error_code="VALIDATION_ERROR",
+        request_id=request_id,
+        errors=errors,
+    )
+
+    response = JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content=error_response.model_dump()
+    )
+
+    processing_time = (time.time() - start_time) * 1000
+    response.headers["X-ErrorHandleTime"] = f"{processing_time:.2f}ms"
+
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def custom_http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Обработчик для стандартных HTTPException"""
+    start_time = time.time()
+
+    logger.error(f"HTTPException: {exc.detail} (status: {exc.status_code})")
+
+    request_id = getattr(request.state, 'request_id', None) or str(hash(request))
+
+    error_response = ErrorResponseModel(
+        status_code=exc.status_code,
+        message=str(exc.detail),
+        error_code=f"HTTP_{exc.status_code}",
+        request_id=request_id
+    )
+
+    response = JSONResponse(
+        status_code=exc.status_code,
+        content=error_response.model_dump(),
+        headers=exc.headers if exc.headers else None
+    )
+
+    processing_time = (time.time() - start_time) * 1000
+    response.headers["X-ErrorHandleTime"] = f"{processing_time:.2f}ms"
+
+    return response
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Обработчик для всех необработанных исключений"""
+    start_time = time.time()
+
+    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+
+    request_id = getattr(request.state, 'request_id', None) or str(hash(request))
+
+    error_response = ErrorResponseModel(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        message="Internal server error",
+        error_code="INTERNAL_ERROR",
+        request_id=request_id,
+        detail=str(exc) if app.debug else None
+    )
+
+    response = JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=error_response.model_dump()
+    )
+
+    processing_time = (time.time() - start_time) * 1000
+    response.headers["X-ErrorHandleTime"] = f"{processing_time:.2f}ms"
+
+    return response
+
+
+@app.get("/test/not-found")
+async def test_not_found():
+    """Тест: 404 User Not Found"""
+    raise UserNotFoundException(user_id=999)
+
+
+@app.get("/test/validation")
+async def test_validation():
+    """Тест: 400 Invalid Data"""
+    raise InvalidUserDataException(
+        "Email must be in valid format",
+        field="email"
+    )
+
+
+@app.get("/test/conflict")
+async def test_conflict():
+    """Тест: 409 User Already Exists"""
+    raise UserAlreadyExistsException("test_user")
+
+
+@app.get("/test/forbidden")
+async def test_forbidden():
+    """Тест: 403 Access Denied"""
+    raise AccessDeniedException("You don't have permission to access this resource")
+
+
+@app.get("/test/internal")
+async def test_internal():
+    """Тест: 500 Internal Error"""
+    raise Exception("Unexpected internal error occurred")
+
+
+@app.get("/test/validation-pydantic")
+async def test_validation_pydantic(
+    age: int = Query(..., ge=0, le=120, description="Age must be between 0 and 120"),
+    email: EmailStr = Query(..., description="Valid email required")
+):
+    """Тест: 422 Validation Error"""
+    return {"age": age, "email": email}
+
+
+@app.get("/test/rate-limit")
+async def test_rate_limit():
+    """Тест: 429 Rate Limit Exceeded"""
+    raise RateLimitExceededException()
+
+
+
+
+
+
+
+
+
+
 
 
 
