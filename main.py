@@ -1,4 +1,5 @@
-
+from core.glitchtip import init_glitchtip
+from config import settings
 from security import (
     create_access_token,
     create_refresh_token,
@@ -56,7 +57,7 @@ import asyncpg
 from zoneinfo import ZoneInfo
 
 
-
+init_glitchtip()
 
 WEEKDAYS = {
     0: "Monday", 1: "Tuesday", 2: "Wednesday",
@@ -3232,7 +3233,38 @@ async def test_rate_limit():
     raise RateLimitExceededException()
 
 
+import sentry_sdk
+from datetime import datetime
 
+
+@app.get("/test-glitchtip")
+async def test_glitchtip():
+    """Тест отправки ошибки с контекстом в GlitchTip"""
+
+    # Добавляем контекст перед ошибкой
+    with sentry_sdk.configure_scope() as scope:
+        # Теги для фильтрации
+        scope.set_tag("test_type", "manual_test")
+        scope.set_tag("environment", "development")
+        scope.set_tag("user_role", "tester")
+
+        # Информация о пользователе
+        scope.set_user({
+            "id": 12345,
+            "username": "test_user",
+            "email": "test@example.com"
+        })
+
+        # Дополнительный контекст
+        scope.set_context("request_info", {
+            "test_key": "test_value",
+            "timestamp": datetime.now().isoformat(),
+            "user_agent": "test-client"
+        })
+
+    # Намеренная ошибка
+    data = {}
+    return data["non_existent_key"]
 
 
 
