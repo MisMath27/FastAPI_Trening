@@ -3268,6 +3268,9 @@ async def test_glitchtip():
 
 
 
+db: dict[int, dict] = {}
+
+
 
 
 

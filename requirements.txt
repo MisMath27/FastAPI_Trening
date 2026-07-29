@@ -8,7 +8,10 @@ pydantic==2.5.0
 python-multipart==0.0.6
 pydantic-settings==2.1.0
 pytz==2023.3
-
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.0
+Faker==20.1.0
 
 
 
