@@ -1,9 +1,10 @@
 import pytest
 from httpx import AsyncClient, ASGITransport
-from main import app
+from main import app, db
 from faker import Faker
 import sys
 import os
+
 
 # Добавляем путь к проекту
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

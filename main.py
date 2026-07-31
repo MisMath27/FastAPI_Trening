@@ -3129,34 +3129,6 @@ async def custom_validation_error_handler(request: Request, exc: RequestValidati
     return response
 
 
-@app.exception_handler(HTTPException)
-async def custom_http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
-    """Обработчик для стандартных HTTPException"""
-    start_time = time.time()
-
-    logger.error(f"HTTPException: {exc.detail} (status: {exc.status_code})")
-
-    request_id = getattr(request.state, 'request_id', None) or str(hash(request))
-
-    error_response = ErrorResponseModel(
-        status_code=exc.status_code,
-        message=str(exc.detail),
-        error_code=f"HTTP_{exc.status_code}",
-        request_id=request_id
-    )
-
-    response = JSONResponse(
-        status_code=exc.status_code,
-        content=error_response.model_dump(),
-        headers=exc.headers if exc.headers else None
-    )
-
-    processing_time = (time.time() - start_time) * 1000
-    response.headers["X-ErrorHandleTime"] = f"{processing_time:.2f}ms"
-
-    return response
-
-
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Обработчик для всех необработанных исключений"""
@@ -3271,9 +3243,54 @@ async def test_glitchtip():
 db: dict[int, dict] = {}
 
 
+from fastapi.responses import JSONResponse
 
 
 
+# Обработчик для ZeroDivisionError
+@app.exception_handler(ZeroDivisionError)
+async def zero_division_handler(request: Request, exc: ZeroDivisionError):
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error_code": "ZERO_DIVISION_ERROR",
+            "message": "Division by zero",
+            "status_code": 500
+        }
+    )
+
+# Обработчик для ValueError
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError):
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error_code": "VALUE_ERROR",
+            "message": str(exc),
+            "status_code": 400
+        }
+    )
+
+# Обработчик для KeyError
+@app.exception_handler(KeyError)
+async def key_error_handler(request: Request, exc: KeyError):
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error_code": "KEY_ERROR",
+            "message": f"Key not found: {exc}",
+            "status_code": 500
+        }
+    )
+
+
+
+@app.exception_handler(RuntimeError)
+async def runtime_error_handler(request: Request, exc: RuntimeError):
+    return JSONResponse(
+        status_code=500,
+        content={"error_code": "RUNTIME_ERROR", "message": str(exc)}
+    )
 
 
 
