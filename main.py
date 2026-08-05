@@ -3293,6 +3293,28 @@ async def runtime_error_handler(request: Request, exc: RuntimeError):
     )
 
 
+from clients.weather import get_weather
+import httpx
+
+@app.get("/weather")
+async def weather_endpoint(city: str):
+    try:
+        result = await get_weather(city)
+        return result
+    except httpx.HTTPStatusError as e:
+        status_code = e.response.status_code
+        if 500 <= status_code < 600:
+            raise HTTPException(status_code = 502, detail=f'External API error: {status_code}')
+        raise HTTPException(status_code=502, detail=f'External API error: {status_code}')
+
+    except httpx.ReadTimeout:
+        raise HTTPException(status_code=504, detail="External API timeout")
+    except httpx.ConnectError:
+        raise HTTPException(status_code=502, detail="External API connection error")
+    except KeyError:
+        raise HTTPException(status_code=502, detail="External API response missing 'temp_c' field")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 
